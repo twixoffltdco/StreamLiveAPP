@@ -16,6 +16,7 @@ import { PROD_BASE, RESERVE_BASE } from './config';
 import { fetchWithChallenge } from './challenge';
 import { parseMeta } from './parse';
 import type { ForumThread, ForumThreadList } from './types';
+import { persistForumEntries } from './cache';
 
 export class ForumSourceError extends Error {
   constructor(message: string) {
@@ -151,6 +152,14 @@ async function scrapeForumList(): Promise<ForumThreadList> {
       const { html, origin } = await fetchPage(path);
       const threads = parseForumCategoriesHtml(html);
       if (threads.length > 0) {
+        void persistForumEntries(
+          threads.map((th) => ({
+            id: th.id,
+            title: th.title,
+            href: th.href,
+            kind: 'category' as const,
+          })),
+        );
         return { threads, origin, allFailed: false };
       }
     } catch (e) {
@@ -187,6 +196,14 @@ async function scrapeForumThread(id: string): Promise<ForumThread | null> {
     const threads = parseCategoryThreadsHtml(html);
 
     if (threads.length > 0) {
+      void persistForumEntries(
+        threads.map((th) => ({
+          id: th.id,
+          title: th.title,
+          href: th.href,
+          kind: 'thread' as const,
+        })),
+      );
       const listHtml = threads
         .map(
           (t) =>
@@ -332,6 +349,7 @@ export async function fetchCategoryThreads(categoryId: string): Promise<ForumThr
   try {
     const { html, origin } = await fetchPage(`/forum_category.php?id=${safeId}`);
     const threads = parseCategoryThreadsHtml(html);
+    void persistForumEntries(threads.map((th) => ({ id: th.id, title: th.title, href: th.href, kind: 'thread' as const })));
     return { threads, origin, allFailed: threads.length === 0 };
   } catch (e) {
     return {
@@ -341,4 +359,11 @@ export async function fetchCategoryThreads(categoryId: string): Promise<ForumThr
       error: (e as Error).message,
     };
   }
+}
+
+
+/** Поиск по локальному архиву форума (без PHP). */
+export async function searchForumLocal(query: string, limit = 30) {
+  const { searchForumArchive } = await import('./cache');
+  return searchForumArchive(query, limit);
 }

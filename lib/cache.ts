@@ -1,13 +1,11 @@
 /**
- * lib/cache.ts — вечная копия спаршенных данных на агрегаторе.
+ * lib/cache.ts — вечная копия на агрегаторе.
  *
- * Куда сохраняется:
- *   1) data/archive.json     — диск проекта (если writable)
- *   2) /tmp/streamlive-archive.json — fallback, если data/ read-only (Layero/Docker)
- *   3) unstable_cache Next   — мета каждой страницы навсегда (revalidate: false)
- *   4) memory (process)      — снимок ленты между запросами одного инстанса
+ * data/archive.json (+ /tmp fallback) — каналы и видео
+ * data/forum-archive.json — заголовки тем/категорий форума
+ * memory — быстрый снимок
  *
- * Даже если PHP/InfinityFree лежит — отдаём архив.
+ * Поиск работает по этим копиям → InfinityFree не долбим.
  */
 
 import { createHash } from 'crypto';
@@ -21,31 +19,52 @@ const ARCHIVE_CANDIDATES = [
   path.join('/tmp', 'streamlive-archive.json'),
 ];
 
-/** In-memory mirror (живёт, пока жив процесс Node) */
+const FORUM_ARCHIVE_CANDIDATES = [
+  path.join(process.cwd(), 'data', 'forum-archive.json'),
+  path.join('/tmp', 'streamlive-forum-archive.json'),
+];
+
+export type ForumArchiveEntry = {
+  id: string;
+  title: string;
+  href: string;
+  kind: 'category' | 'thread';
+  cachedAt: string;
+};
+
 let memoryArchive: Record<string, StreamContent> = {};
+let memoryForum: Record<string, ForumArchiveEntry> = {};
 let memoryFeedAt = 0;
 let memoryFeedItems: StreamContent[] = [];
 
-/** Стабильный id карточки = md5 от исходного URL */
 export function contentId(sourceUrl: string): string {
   return createHash('md5').update(sourceUrl).digest('hex').slice(0, 16);
 }
 
-async function tryReadFile(file: string): Promise<Record<string, StreamContent> | null> {
+async function tryReadJson<T>(file: string): Promise<T | null> {
   try {
-    const raw = await fs.readFile(file, 'utf8');
-    return JSON.parse(raw) as Record<string, StreamContent>;
+    return JSON.parse(await fs.readFile(file, 'utf8')) as T;
   } catch {
     return null;
   }
 }
 
-/** Читает архив: memory → data/ → /tmp/ */
+async function tryWriteJson(file: string, data: unknown): Promise<boolean> {
+  try {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmp = file + '.tmp';
+    await fs.writeFile(tmp, JSON.stringify(data), 'utf8');
+    await fs.rename(tmp, file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function readArchive(): Promise<Record<string, StreamContent>> {
   if (Object.keys(memoryArchive).length > 0) {
-    // подмешиваем диск, если там больше записей
     for (const file of ARCHIVE_CANDIDATES) {
-      const disk = await tryReadFile(file);
+      const disk = await tryReadJson<Record<string, StreamContent>>(file);
       if (disk) {
         memoryArchive = { ...disk, ...memoryArchive };
         break;
@@ -53,9 +72,8 @@ async function readArchive(): Promise<Record<string, StreamContent>> {
     }
     return { ...memoryArchive };
   }
-
   for (const file of ARCHIVE_CANDIDATES) {
-    const disk = await tryReadFile(file);
+    const disk = await tryReadJson<Record<string, StreamContent>>(file);
     if (disk && Object.keys(disk).length > 0) {
       memoryArchive = disk;
       return { ...disk };
@@ -64,27 +82,12 @@ async function readArchive(): Promise<Record<string, StreamContent>> {
   return {};
 }
 
-async function writeArchive(items: StreamContent[]): Promise<void> {
+async function writeContentArchive(items: StreamContent[]): Promise<void> {
   const existing = await readArchive();
   for (const item of items) existing[item.id] = item;
   memoryArchive = existing;
-
-  const payload = JSON.stringify(existing);
-  let written = false;
   for (const file of ARCHIVE_CANDIDATES) {
-    try {
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      const tmp = file + '.tmp';
-      await fs.writeFile(tmp, payload, 'utf8');
-      await fs.rename(tmp, file);
-      written = true;
-      break;
-    } catch {
-      /* next candidate */
-    }
-  }
-  if (!written) {
-    console.warn('[cache] Диск недоступен — архив только в memory + unstable_cache');
+    if (await tryWriteJson(file, existing)) break;
   }
 }
 
@@ -100,22 +103,79 @@ export async function getArchivedById(id: string): Promise<StreamContent | null>
   return archive[id] ?? null;
 }
 
-/** Все id, которые уже есть в вечной копии */
 export async function getArchivedIdSet(): Promise<Set<string>> {
-  const archive = await readArchive();
-  return new Set(Object.keys(archive));
+  return new Set(Object.keys(await readArchive()));
 }
 
 export async function persistToArchive(items: StreamContent[]): Promise<void> {
-  if (items.length === 0) return;
+  if (!items.length) return;
   try {
-    await writeArchive(items);
+    await writeContentArchive(items);
   } catch (e) {
-    console.warn('[cache] Не удалось записать архив:', (e as Error).message);
+    console.warn('[cache] archive write fail', (e as Error).message);
   }
 }
 
-/** Снимок ленты в memory (чтобы не долбить PHP на каждый F5) */
+/** —— Форум-архив —— */
+async function readForumArchive(): Promise<Record<string, ForumArchiveEntry>> {
+  if (Object.keys(memoryForum).length > 0) {
+    for (const file of FORUM_ARCHIVE_CANDIDATES) {
+      const disk = await tryReadJson<Record<string, ForumArchiveEntry>>(file);
+      if (disk) {
+        memoryForum = { ...disk, ...memoryForum };
+        break;
+      }
+    }
+    return { ...memoryForum };
+  }
+  for (const file of FORUM_ARCHIVE_CANDIDATES) {
+    const disk = await tryReadJson<Record<string, ForumArchiveEntry>>(file);
+    if (disk && Object.keys(disk).length > 0) {
+      memoryForum = disk;
+      return { ...disk };
+    }
+  }
+  return {};
+}
+
+export async function persistForumEntries(
+  entries: Array<{ id: string; title: string; href: string; kind?: 'category' | 'thread' }>,
+): Promise<void> {
+  if (!entries.length) return;
+  const existing = await readForumArchive();
+  const now = new Date().toISOString();
+  for (const e of entries) {
+    if (!e.id || !e.title) continue;
+    existing[`${e.kind ?? 'thread'}:${e.id}`] = {
+      id: e.id,
+      title: e.title,
+      href: e.href,
+      kind: e.kind ?? 'thread',
+      cachedAt: now,
+    };
+  }
+  memoryForum = existing;
+  for (const file of FORUM_ARCHIVE_CANDIDATES) {
+    if (await tryWriteJson(file, existing)) break;
+  }
+}
+
+export async function searchForumArchive(query: string, limit = 30): Promise<ForumArchiveEntry[]> {
+  const lower = query.trim().toLowerCase();
+  if (!lower) return [];
+  const tokens = lower.split(/[\s,.;:+\-_/]+/).filter((t) => t.length >= 2);
+  const all = Object.values(await readForumArchive());
+  return all
+    .filter((e) => {
+      const hay = `${e.title} ${e.href}`.toLowerCase();
+      if (hay.includes(lower)) return true;
+      if (tokens.length > 1 && tokens.every((t) => hay.includes(t))) return true;
+      if (tokens.length === 1 && hay.includes(tokens[0])) return true;
+      return false;
+    })
+    .slice(0, limit);
+}
+
 export function getMemoryFeed(maxAgeSec: number): StreamContent[] | null {
   if (!memoryFeedItems.length) return null;
   if (Date.now() - memoryFeedAt > maxAgeSec * 1000) return null;
@@ -127,9 +187,6 @@ export function setMemoryFeed(items: StreamContent[]): void {
   memoryFeedAt = Date.now();
 }
 
-/**
- * Мета одной страницы — навсегда в Next cache.
- */
 export function foreverCachePage<T extends { sourceUrl: string }>(
   fn: (sourceUrl: string) => Promise<T>,
 ) {

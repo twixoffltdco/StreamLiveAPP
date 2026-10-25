@@ -27,8 +27,10 @@ import {
   getArchivedItems,
   getMemoryFeed,
   persistToArchive,
+  searchForumArchive,
   setMemoryFeed,
 } from './cache';
+import type { ForumArchiveEntry } from './cache';
 import type { FeedResult, StreamContent } from './types';
 
 class SourceError extends Error {
@@ -221,17 +223,19 @@ export async function fetchVideosFeed(limit = FEED_LIMIT): Promise<FeedResult> {
 /**
  * Поиск: только по архиву + мягкий refresh лент (без шторма запросов).
  */
-export async function searchFeed(query: string, limit = FEED_LIMIT): Promise<FeedResult> {
+export type SearchResult = {
+  channels: StreamContent[];
+  videos: StreamContent[];
+  forum: ForumArchiveEntry[];
+};
+
+/** Универсальный поиск ТОЛЬКО по локальным копиям (каналы, видео, форум). Без PHP. */
+export async function searchAll(query: string, limit = FEED_LIMIT): Promise<SearchResult> {
   const raw = query.trim();
-  if (!raw) return { items: [], allFailed: false };
+  if (!raw) return { channels: [], videos: [], forum: [] };
 
   const lower = raw.toLowerCase();
-  const tokens = lower
-    .split(/[\s,.;:+\-_/]+/)
-    .map((t) => t.trim())
-    .filter((t) => t.length >= 2);
-
-  const found = new Map<string, StreamContent>();
+  const tokens = lower.split(/[\s,.;:+\-_/]+/).filter((t) => t.length >= 2);
 
   const matches = (it: StreamContent): boolean => {
     const hay = `${it.title} ${it.description} ${it.sourceUrl}`.toLowerCase();
@@ -241,54 +245,19 @@ export async function searchFeed(query: string, limit = FEED_LIMIT): Promise<Fee
     return false;
   };
 
-  const add = (items: StreamContent[]) => {
-    for (const it of items) {
-      if (matches(it) && !found.has(it.id)) found.set(it.id, it);
-    }
-  };
+  const archived = await getArchivedItems(10_000);
+  const channels = archived.filter((i) => i.kind !== 'video' && matches(i)).slice(0, limit);
+  const videos = archived.filter((i) => i.kind === 'video' && matches(i)).slice(0, limit);
+  const forum = await searchForumArchive(raw, limit);
 
-  // 1) Только архив / memory — 0 хитов на InfinityFree
-  add(await getArchivedItems(10_000));
-  if (found.size > 0) {
-    return { items: Array.from(found.values()).slice(0, limit), allFailed: false };
-  }
+  return { channels, videos, forum };
+}
 
-  // 2) PHP только если в копии ничего нет (один запрос: smotrim)
-  try {
-    const path = `/smotrim.php?search=${encodeURIComponent(raw)}`;
-    const { html } = await fetchPageFailover(path);
-    const links = new Set<string>([
-      ...extractContentLinks(html, PROD_BASE),
-      ...extractVideoLinks(html, PROD_BASE),
-    ]);
-    const re = /channel(?:-pc)?\.php\?[^"'<>]*slug=([A-Za-z0-9_\-%]+)/gi;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(html)) !== null) {
-      try {
-        links.add(`${PROD_BASE}/channel.php?slug=${decodeURIComponent(m[1])}`);
-      } catch {
-        /* skip */
-      }
-    }
-
-    const known = await getArchivedIdSet();
-    const newly = await scrapeNewOnly(Array.from(links), known);
-    if (newly.length) {
-      void persistToArchive(newly);
-      add(newly);
-    }
-
-    const arch = await getArchivedItems(10_000);
-    const byId = new Map(arch.map((i) => [i.id, i]));
-    for (const url of links) {
-      const hit = byId.get(contentId(url));
-      if (hit) add([hit]);
-    }
-  } catch {
-    /* источник лёг — остаёмся с пустым/архивом */
-  }
-
-  return { items: Array.from(found.values()).slice(0, limit), allFailed: false };
+/** Совместимость: плоский список каналов+видео из архива */
+export async function searchFeed(query: string, limit = FEED_LIMIT): Promise<FeedResult> {
+  const r = await searchAll(query, limit);
+  const items = [...r.channels, ...r.videos].slice(0, limit);
+  return { items, allFailed: false };
 }
 
 export function hashKey(input: string): string {
