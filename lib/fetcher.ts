@@ -224,27 +224,68 @@ export async function fetchVideosFeed(limit = FEED_LIMIT): Promise<FeedResult> {
 export async function searchFeed(query: string, limit = FEED_LIMIT): Promise<FeedResult> {
   const raw = query.trim();
   if (!raw) return { items: [], allFailed: false };
+
   const lower = raw.toLowerCase();
+  const tokens = lower
+    .split(/[\s,.;:+\-_/]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
 
   const found = new Map<string, StreamContent>();
+
+  const matches = (it: StreamContent): boolean => {
+    const hay = `${it.title} ${it.description} ${it.sourceUrl}`.toLowerCase();
+    if (hay.includes(lower)) return true;
+    if (tokens.length > 1 && tokens.every((tok) => hay.includes(tok))) return true;
+    if (tokens.length === 1 && hay.includes(tokens[0])) return true;
+    return false;
+  };
+
   const add = (items: StreamContent[]) => {
     for (const it of items) {
-      const hay = `${it.title} ${it.description} ${it.sourceUrl}`.toLowerCase();
-      if (hay.includes(lower) && !found.has(it.id)) found.set(it.id, it);
+      if (matches(it) && !found.has(it.id)) found.set(it.id, it);
     }
   };
 
-  // Сначала архив — 0 хитов на PHP
+  // 1) Только архив / memory — 0 хитов на InfinityFree
   add(await getArchivedItems(10_000));
+  if (found.size > 0) {
+    return { items: Array.from(found.values()).slice(0, limit), allFailed: false };
+  }
 
-  // Если мало — один soft-refresh каналов (с лимитом новых)
-  if (found.size < limit) {
-    try {
-      const feed = await fetchFeed(Math.max(limit, 24));
-      add(feed.items);
-    } catch {
-      /* ignore */
+  // 2) PHP только если в копии ничего нет (один запрос: smotrim)
+  try {
+    const path = `/smotrim.php?search=${encodeURIComponent(raw)}`;
+    const { html } = await fetchPageFailover(path);
+    const links = new Set<string>([
+      ...extractContentLinks(html, PROD_BASE),
+      ...extractVideoLinks(html, PROD_BASE),
+    ]);
+    const re = /channel(?:-pc)?\.php\?[^"'<>]*slug=([A-Za-z0-9_\-%]+)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      try {
+        links.add(`${PROD_BASE}/channel.php?slug=${decodeURIComponent(m[1])}`);
+      } catch {
+        /* skip */
+      }
     }
+
+    const known = await getArchivedIdSet();
+    const newly = await scrapeNewOnly(Array.from(links), known);
+    if (newly.length) {
+      void persistToArchive(newly);
+      add(newly);
+    }
+
+    const arch = await getArchivedItems(10_000);
+    const byId = new Map(arch.map((i) => [i.id, i]));
+    for (const url of links) {
+      const hit = byId.get(contentId(url));
+      if (hit) add([hit]);
+    }
+  } catch {
+    /* источник лёг — остаёмся с пустым/архивом */
   }
 
   return { items: Array.from(found.values()).slice(0, limit), allFailed: false };
