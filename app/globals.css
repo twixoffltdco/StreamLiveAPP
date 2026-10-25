@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===== Zoomer 2026 base ===== */
+html,
+body {
+  background: #000000; /* pure black */
+  color: #ffffff;
+  overscroll-behavior-y: none;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Вертикальный snap-скролл ленты в стиле TikTok */
+.feed-snap {
+  height: 100dvh;
+  overflow-y: scroll;
+  scroll-snap-type: y mandatory;
+  scrollbar-width: none;
+}
+.feed-snap::-webkit-scrollbar {
+  display: none;
+}
+.feed-snap > * {
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+}
+
+/* Текст поверх видео — читаемость через text-shadow */
+.video-text-shadow {
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.85), 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+
+/* Градиентная подложка снизу карточки */
+.card-gradient {
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.55) 40%, transparent 100%);
+}
+
+/* Стеклянные поверхности (glassmorphism) */
+.glass {
+  background: rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* Неоновый dual-ring спиннер (TikTok-style) */
+.tiktok-spinner {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  position: relative;
+}
+.tiktok-spinner::before,
+.tiktok-spinner::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 4px solid transparent;
+}
+.tiktok-spinner::before {
+  border-top-color: #00f2ea;
+  border-right-color: #00f2ea;
+  animation: spin 0.9s linear infinite;
+}
+.tiktok-spinner::after {
+  border-bottom-color: #fe2c55;
+  border-left-color: #fe2c55;
+  animation: spin 1.3s linear infinite reverse;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Плавное появление контента после реального fetch */
+.animate-rise {
+  animation: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(24px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Пульс LIVE-индикатора */
+.live-dot {
+  box-shadow: 0 0 0 0 rgba(254, 44, 85, 0.7);
+  animation: livePulse 1.6s infinite;
+}
+@keyframes livePulse {
+  70% {
+    box-shadow: 0 0 0 10px rgba(254, 44, 85, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(254, 44, 85, 0);
+  }
+}
