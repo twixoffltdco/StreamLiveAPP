@@ -142,10 +142,13 @@ async function scrapeForumThread(id: string): Promise<ForumThread | null> {
         '.postbody', '.post_body', '.message-body', '.topic-content',
         '.forum-topic', 'article', '#maincontent', 'main', '.content',
       ];
-      let $body = $('body');
+      // Cheerio 1.x: $(sel).first() имеет тип Cheerio<AnyNode>, а $('body') — Cheerio<Element>.
+      // Используем any-совместимый контейнер, чтобы не ломать strict-сборку Next.js.
+      let $body = $('body') as ReturnType<typeof $>;
       for (const sel of selectors) {
-        if ($(sel).length > 0) {
-          $body = $(sel).first();
+        const found = $(sel).first();
+        if (found.length > 0) {
+          $body = found as ReturnType<typeof $>;
           break;
         }
       }
