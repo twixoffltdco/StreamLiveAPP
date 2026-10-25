@@ -1,17 +1,17 @@
 'use client';
 
 /**
- * VideoCard — карточка контента в стиле TikTok (Zoomer 2026).
- *
- * - по тапу подгружается iframe-плеер (embed.php)
- * - referrerPolicy="no-referrer" — обход части блокировок iframe
- * - fallback «Открыть на источнике», если iframe чёрный (JS-challenge)
+ * VideoCard — TikTok-карточка.
+ * Плеер: StreamPlayer (iframe → HLS → Playerjs), как в PHP embed.php.
+ * embedUrl всегда с cinema=0.
  */
 
 import { Heart, MessageCircle, Share2, Play, ExternalLink } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import Image from 'next/image';
 import type { StreamContent } from '@/lib/types';
+import StreamPlayer from '@/components/StreamPlayer';
+import { PROD_BASE } from '@/lib/config';
 
 function PipGlyph({ className }: { className?: string }) {
   return (
@@ -22,45 +22,59 @@ function PipGlyph({ className }: { className?: string }) {
   );
 }
 
+function withCinemaZero(url: string): string {
+  try {
+    const u = new URL(url);
+    if (/embed\.php/i.test(u.pathname)) u.searchParams.set('cinema', '0');
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 export default function VideoCard({ item }: { item: StreamContent }) {
   const [playerOn, setPlayerOn] = useState(false);
   const [liked, setLiked] = useState(false);
   const [shareMsg, setShareMsg] = useState(false);
 
+  const embedUrl = useMemo(() => withCinemaZero(item.embedUrl || item.sourceUrl), [item.embedUrl, item.sourceUrl]);
+
   async function handleShare() {
     const shareData = { title: item.title, text: item.description, url: item.sourceUrl };
     try {
-      if (navigator.share) {
-        await navigator.share(shareData);
-      } else {
-        await navigator.clipboard.writeText(item.sourceUrl);
-      }
+      if (navigator.share) await navigator.share(shareData);
+      else await navigator.clipboard.writeText(item.sourceUrl);
       setShareMsg(true);
       setTimeout(() => setShareMsg(false), 1500);
     } catch {
-      /* user closed sheet */
+      /* closed */
     }
   }
 
   function handlePip() {
-    window.open(item.embedUrl, 'streamlive-pip', 'popup,width=480,height=320');
+    window.open(embedUrl, 'streamlive-pip', 'popup,width=480,height=320');
   }
 
   function openOnSource() {
-    window.open(item.embedUrl || item.sourceUrl, '_blank', 'noopener,noreferrer');
+    window.open(embedUrl || item.sourceUrl, '_blank', 'noopener,noreferrer');
   }
+
+  // База для playerjs.js — origin embed-источника
+  const playerjsBase = useMemo(() => {
+    try {
+      return new URL(embedUrl).origin;
+    } catch {
+      return PROD_BASE;
+    }
+  }, [embedUrl]);
 
   return (
     <section className="relative h-dvh w-full shrink-0 overflow-hidden bg-black animate-rise">
       {playerOn ? (
-        <iframe
-          src={item.embedUrl}
+        <StreamPlayer
+          embedUrl={embedUrl}
+          playerjsBase={playerjsBase}
           title={item.title}
-          className="absolute inset-0 h-full w-full border-0 bg-black"
-          allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-          allowFullScreen
-          referrerPolicy="no-referrer"
-          
         />
       ) : item.image ? (
         <Image
@@ -89,7 +103,7 @@ export default function VideoCard({ item }: { item: StreamContent }) {
       )}
 
       {playerOn && (
-        <div className="absolute left-1/2 top-1/2 z-30 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 pointer-events-none">
+        <div className="pointer-events-none absolute left-1/2 top-1/2 z-30 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3">
           <button
             onClick={openOnSource}
             className="pointer-events-auto glass flex items-center gap-2 rounded-2xl px-5 py-3 text-sm font-bold text-neon-cyan shadow-neon-cyan transition-transform active:scale-95"
@@ -97,8 +111,8 @@ export default function VideoCard({ item }: { item: StreamContent }) {
             <ExternalLink className="h-4 w-4" />
             Открыть эфир на источнике
           </button>
-          <p className="pointer-events-none max-w-[240px] text-center text-[11px] text-white/50">
-            Если экран чёрный — источник блокирует iframe. Жми кнопку выше.
+          <p className="max-w-[240px] text-center text-[11px] text-white/50">
+            Если экран чёрный — жми кнопку выше
           </p>
         </div>
       )}
