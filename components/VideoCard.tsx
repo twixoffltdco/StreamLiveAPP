@@ -2,12 +2,12 @@
 
 /**
  * VideoCard — TikTok-карточка.
- * Плеер: StreamPlayer (iframe → HLS → Playerjs), как в PHP embed.php.
- * embedUrl всегда с cinema=0.
+ * Плеер: StreamPlayer / iframe embed с cinema=0.
+ * Source → channel.php?slug= или video.php?slug= (не catalog).
  */
 
 import { Heart, MessageCircle, Share2, Play, ExternalLink } from 'lucide-react';
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import Image from 'next/image';
 import type { StreamContent } from '@/lib/types';
 import StreamPlayer from '@/components/StreamPlayer';
@@ -37,16 +37,38 @@ export default function VideoCard({ item }: { item: StreamContent }) {
   const [playerOn, setPlayerOn] = useState(false);
   const [liked, setLiked] = useState(false);
   const [shareMsg, setShareMsg] = useState(false);
+  const [showFallback, setShowFallback] = useState(false);
 
-  const embedUrl = useMemo(() => withCinemaZero(item.embedUrl || item.sourceUrl), [item.embedUrl, item.sourceUrl]);
+  const embedUrl = useMemo(
+    () => withCinemaZero(item.embedUrl || item.sourceUrl),
+    [item.embedUrl, item.sourceUrl],
+  );
+
+  const pageUrl = useMemo(() => {
+    return item.kind === 'video'
+      ? mapToVideoPage(item.sourceUrl)
+      : mapToChannelPage(item.sourceUrl);
+  }, [item.kind, item.sourceUrl]);
+
+  // Оверлей «открыть на источнике» — только через 4с (если iframe чёрный)
+  useEffect(() => {
+    if (!playerOn) {
+      setShowFallback(false);
+      return;
+    }
+    const t = setTimeout(() => setShowFallback(true), 4000);
+    return () => clearTimeout(t);
+  }, [playerOn]);
 
   async function handleShare() {
-    const pageUrl =
-      item.kind === 'video' ? mapToVideoPage(item.sourceUrl) : mapToChannelPage(item.sourceUrl);
-    const shareData = { title: item.title, text: item.description, url: pageUrl || item.sourceUrl };
+    const shareData = {
+      title: item.title,
+      text: item.description,
+      url: pageUrl || item.sourceUrl,
+    };
     try {
       if (navigator.share) await navigator.share(shareData);
-      else await navigator.clipboard.writeText(item.sourceUrl);
+      else await navigator.clipboard.writeText(pageUrl || item.sourceUrl);
       setShareMsg(true);
       setTimeout(() => setShareMsg(false), 1500);
     } catch {
@@ -59,15 +81,9 @@ export default function VideoCard({ item }: { item: StreamContent }) {
   }
 
   function openOnSource() {
-    // Канал → channel.php?slug=…  |  Видео → video.php?slug=…  (не catalog)
-    const page =
-      item.kind === 'video'
-        ? mapToVideoPage(item.sourceUrl)
-        : mapToChannelPage(item.sourceUrl);
-    window.open(page || embedUrl || item.sourceUrl, '_blank', 'noopener,noreferrer');
+    window.open(pageUrl || embedUrl || item.sourceUrl, '_blank', 'noopener,noreferrer');
   }
 
-  // База для playerjs.js — origin embed-источника
   const playerjsBase = useMemo(() => {
     try {
       return new URL(embedUrl).origin;
@@ -79,11 +95,7 @@ export default function VideoCard({ item }: { item: StreamContent }) {
   return (
     <section className="relative h-dvh w-full shrink-0 overflow-hidden bg-black animate-rise">
       {playerOn ? (
-        <StreamPlayer
-          embedUrl={embedUrl}
-          playerjsBase={playerjsBase}
-          title={item.title}
-        />
+        <StreamPlayer embedUrl={embedUrl} playerjsBase={playerjsBase} title={item.title} />
       ) : item.image ? (
         <Image
           src={item.image}
@@ -110,28 +122,25 @@ export default function VideoCard({ item }: { item: StreamContent }) {
         </button>
       )}
 
-      {playerOn && (
-        <div className="pointer-events-none absolute left-1/2 top-1/2 z-30 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3">
+      {playerOn && showFallback && (
+        <div className="pointer-events-none absolute bottom-36 left-1/2 z-30 flex -translate-x-1/2 flex-col items-center gap-2">
           <button
             onClick={openOnSource}
-            className="pointer-events-auto glass flex items-center gap-2 rounded-2xl px-5 py-3 text-sm font-bold text-neon-cyan shadow-neon-cyan transition-transform active:scale-95"
+            className="pointer-events-auto glass flex items-center gap-2 rounded-2xl px-4 py-2.5 text-xs font-bold text-neon-cyan shadow-neon-cyan transition-transform active:scale-95"
           >
-            <ExternalLink className="h-4 w-4" />
-            Открыть эфир на источнике
+            <ExternalLink className="h-3.5 w-3.5" />
+            Открыть на источнике
           </button>
-          <p className="max-w-[240px] text-center text-[11px] text-white/50">
-            Если экран чёрный — жми кнопку выше
-          </p>
         </div>
       )}
 
       <div className="pointer-events-none absolute left-4 top-4 z-20 flex items-center gap-2">
         <span className="glass flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-bold uppercase tracking-wider">
           <span className="h-2 w-2 animate-pulse rounded-full bg-neon-pink" />
-          Live
+          {item.kind === 'video' ? 'VOD' : 'Live'}
         </span>
         <span className="glass rounded-full px-3 py-1 text-[10px] font-medium text-white/60">
-          {item.origin.toUpperCase()} · archived forever
+          {item.origin.toUpperCase()}
         </span>
       </div>
 
@@ -167,7 +176,7 @@ export default function VideoCard({ item }: { item: StreamContent }) {
             <Share2 className="h-6 w-6 text-white" />
             {shareMsg && (
               <span className="absolute -top-8 whitespace-nowrap rounded-md bg-neon-cyan px-2 py-0.5 text-[10px] font-bold text-black">
-                Ссылка там! 🔥
+                Ссылка там!
               </span>
             )}
           </span>

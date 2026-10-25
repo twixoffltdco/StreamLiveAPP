@@ -10,11 +10,11 @@ import { fetchVideosFeed } from '@/lib/fetcher';
 export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {
-  title: 'Видео — StreamLive',
-  description: 'Видео с зеркал StreamLive: каталог VOD с Prod и Reserve.',
+  title: 'Видео',
+  description: 'Видеохостинг StreamLive: VOD и стримы с Prod и Reserve.',
   openGraph: {
     title: 'Видео — StreamLive',
-    description: 'Видео с зеркал StreamLive',
+    description: 'VOD и стримы StreamLive',
     type: 'website',
   },
   robots: { index: true, follow: true },
@@ -27,9 +27,9 @@ async function VideosFeed() {
     return (
       <div className="flex min-h-[70dvh] flex-col items-center justify-center gap-4 px-6 text-center">
         <Film className="h-12 w-12 text-neon-pink opacity-70" />
-        <h1 className="text-xl font-extrabold">Видео пока нет</h1>
+        <h1 className="text-xl font-extrabold">Пока пусто</h1>
         <p className="max-w-sm text-sm text-white/60">
-          Не удалось спарсить /videos.php с Prod и Reserve. Попробуй позже.
+          Раздел видео на зеркалах сейчас без карточек. Загляни на каналы или попробуй позже.
         </p>
         {feed.error && (
           <p className="glass max-w-full truncate rounded-xl px-4 py-2 font-mono text-[11px] text-neon-cyan">
@@ -37,7 +37,7 @@ async function VideosFeed() {
           </p>
         )}
         <Link href="/" className="text-sm font-bold text-neon-cyan">
-          ← К ленте каналов
+          ← К каналам
         </Link>
       </div>
     );

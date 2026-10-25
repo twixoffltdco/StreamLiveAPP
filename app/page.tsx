@@ -10,6 +10,12 @@ import { fetchFeed } from '@/lib/fetcher';
  */
 export const dynamic = 'force-dynamic';
 
+export const metadata = {
+  title: 'Каналы',
+  description: 'Прямые эфиры StreamLive с Prod и Reserve. Вечный кэш карточек.',
+  robots: { index: true, follow: true },
+};
+
 /** Лента — отдельный Server Component под Suspense со спиннером */
 async function Feed() {
   const feed = await fetchFeed();

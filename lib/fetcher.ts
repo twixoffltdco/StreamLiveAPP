@@ -138,26 +138,70 @@ export async function fetchFeed(limit = FEED_LIMIT): Promise<FeedResult> {
  * когда-либо спаршенных карточек (без моков).
  */
 export async function searchFeed(query: string, limit = FEED_LIMIT): Promise<FeedResult> {
-  const q = encodeURIComponent(query.trim());
-  try {
-    const { html } = await fetchPageFailover(`/?s=${q}`);
-    const links = extractContentLinks(html, PROD_BASE);
-    const settled = await Promise.allSettled(
-      links.slice(0, limit).map((url) => scrapeContentCached(url)),
-    );
-    const items = settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []));
-    void persistToArchive(items);
-    if (items.length > 0) return { items, allFailed: false };
-  } catch {
-    /* падаем в архив */
+  const raw = query.trim();
+  if (!raw) return { items: [], allFailed: false };
+
+  const lower = raw.toLowerCase();
+  const found = new Map<string, StreamContent>();
+
+  const addItems = (items: StreamContent[]) => {
+    for (const it of items) {
+      const hay = `${it.title} ${it.description} ${it.sourceUrl}`.toLowerCase();
+      if (hay.includes(lower) && !found.has(it.id)) found.set(it.id, it);
+    }
+  };
+
+  // 1) Живой поиск на источнике (несколько типичных путей PHP)
+  const searchPaths = [
+    `/?s=${encodeURIComponent(raw)}`,
+    `/search.php?q=${encodeURIComponent(raw)}`,
+    `/videos.php?q=${encodeURIComponent(raw)}`,
+    `/channel.php?q=${encodeURIComponent(raw)}`,
+  ];
+  for (const path of searchPaths) {
+    try {
+      const { html } = await fetchPageFailover(path);
+      const links = [
+        ...extractContentLinks(html, PROD_BASE),
+        ...extractVideoLinks(html, PROD_BASE),
+      ];
+      const settled = await Promise.allSettled(
+        links.slice(0, limit).map((url) => scrapeContentCached(url)),
+      );
+      addItems(settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : [])));
+      if (found.size >= limit) break;
+    } catch {
+      /* next path */
+    }
   }
 
-  // Fallback: реальный поиск по вечному локальному архиву
-  const lower = query.toLowerCase();
-  const archived = (await getArchivedItems(10_000)).filter(
-    (i) => i.title.toLowerCase().includes(lower) || i.description.toLowerCase().includes(lower),
-  );
-  return { items: archived.slice(0, limit), allFailed: false };
+  // 2) Фильтр по текущей ленте каналов + видео (реальный контент зеркал)
+  if (found.size < limit) {
+    try {
+      const [channels, videos] = await Promise.all([
+        fetchFeed(Math.max(limit, 24)),
+        fetchVideosFeed(Math.max(limit, 24)),
+      ]);
+      addItems(channels.items);
+      addItems(videos.items);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 3) Вечный архив
+  if (found.size < limit) {
+    try {
+      const archived = await getArchivedItems(10_000);
+      addItems(archived);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const items = Array.from(found.values()).slice(0, limit);
+  void persistToArchive(items);
+  return { items, allFailed: false };
 }
 
 /** Хэш для стабильных ключей React (используется в API роуте) */
@@ -171,6 +215,7 @@ export function hashKey(input: string): string {
  * Failover Prod → Reserve, кэш + архив.
  */
 export async function fetchVideosFeed(limit = FEED_LIMIT): Promise<FeedResult> {
+  // Местный видеохостинг: на /videos.php бывают и VOD (video.php), и стримы (channel.php)
   const paths = ['/videos.php', '/videos'];
   try {
     let links: string[] = [];
@@ -178,41 +223,36 @@ export async function fetchVideosFeed(limit = FEED_LIMIT): Promise<FeedResult> {
     for (const path of paths) {
       try {
         const { html } = await fetchPageFailover(path);
-        // только video.php?slug=
-        links = extractVideoLinks(html, PROD_BASE).filter((u) => /video\.php/i.test(u) && !/videos\.php/i.test(u));
+        const fromVideo = extractVideoLinks(html, PROD_BASE);
+        const fromAll = extractContentLinks(html, PROD_BASE);
+        // всё, что на странице видео-хостинга: video.php + channel.php со страницы
+        links = Array.from(new Set([...fromVideo, ...fromAll]));
         if (links.length > 0) break;
       } catch (e) {
         lastErr = (e as Error).message;
       }
     }
 
-    // дедуп
-    links = Array.from(new Set(links));
-
     if (links.length === 0) {
-      const archived = (await getArchivedItems(10_000)).filter((i) => i.kind === 'video');
+      const archived = await getArchivedItems(limit * 2);
       if (archived.length > 0) return { items: archived.slice(0, limit), allFailed: false };
-      return { items: [], allFailed: true, error: lastErr || 'На /videos.php нет ссылок video.php' };
+      return { items: [], allFailed: true, error: lastErr || 'Раздел видео пуст на источниках' };
     }
 
     const settled = await Promise.allSettled(
       links.slice(0, limit).map((url) => scrapeContentCached(url)),
     );
-    const items = settled
-      .flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []))
-      .filter((it) => /video\.php/i.test(it.sourceUrl) || it.kind === 'video')
-      .map((it) => ({ ...it, kind: 'video' as const }));
-
+    const items = settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []));
     void persistToArchive(items);
 
     if (items.length === 0) {
-      const archived = (await getArchivedItems(10_000)).filter((i) => i.kind === 'video');
+      const archived = await getArchivedItems(limit * 2);
       if (archived.length > 0) return { items: archived.slice(0, limit), allFailed: false };
-      return { items: [], allFailed: true, error: 'Не удалось распарсить video.php карточки' };
+      return { items: [], allFailed: true, error: 'Не удалось распарсить карточки раздела видео' };
     }
     return { items, allFailed: false };
   } catch (e) {
-    const archived = (await getArchivedItems(10_000)).filter((i) => i.kind === 'video');
+    const archived = await getArchivedItems(limit * 2);
     if (archived.length > 0) return { items: archived.slice(0, limit), allFailed: false };
     return { items: [], allFailed: true, error: (e as Error).message };
   }
