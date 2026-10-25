@@ -1,13 +1,12 @@
 /**
- * lib/parse.ts — умный парсинг HTML (аналог PHP file_get_contents + regex).
- * Извлекает title / description / og:image и выполняет endpoint-маппинг:
- *   channel.php -> embed.php, video.php -> embed_video.php.
+ * lib/parse.ts — умный парсинг HTML.
+ * Извлекает title / description / og:image и endpoint-маппинг в embed.php?slug=…&cinema=0
+ * (как в оригинальном PHP embed.php: raw-плеер без cinema-лендинга).
  */
 
 import * as cheerio from 'cheerio';
 import type { ContentKind } from './types';
 
-/** Суффиксы, очищаемые из <title> (как в исходном PHP-скрипте) */
 const TITLE_SUFFIXES = ['— Смотрим', '- Смотрим', '– Смотрим', '| Смотрим'];
 
 export interface ParsedMeta {
@@ -16,7 +15,6 @@ export interface ParsedMeta {
   image: string | null;
 }
 
-/** Очистка заголовка от "— Смотрим" и лишних пробелов */
 export function cleanTitle(raw: string): string {
   let t = raw.trim();
   for (const suffix of TITLE_SUFFIXES) {
@@ -25,28 +23,21 @@ export function cleanTitle(raw: string): string {
   return t;
 }
 
-/**
- * Парсит HTML через Cheerio: title, meta[description], meta[og:image].
- * Fallback на regex, если Cheerio не находит тег (кривая разметка источника).
- */
 export function parseMeta(html: string): ParsedMeta {
   const $ = cheerio.load(html);
 
-  // 1. <title> с очисткой
   let title = cleanTitle($('title').first().text() || '');
   if (!title) {
     const m = html.match(/<title[^>]*>([^<]*)<\/title>/i);
     title = m ? cleanTitle(m[1]) : '';
   }
 
-  // 2. meta[name="description"]
   let description = ($('meta[name="description"]').attr('content') ?? '').trim();
   if (!description) {
     const m = html.match(/<meta\s+name=["']description["']\s+content=["']([^"']*)["']/i);
     description = m ? m[1].trim() : '';
   }
 
-  // 3. meta[property="og:image"]
   let image = ($('meta[property="og:image"]').attr('content') ?? '').trim();
   if (!image) {
     const m = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']*)["']/i);
@@ -56,32 +47,94 @@ export function parseMeta(html: string): ParsedMeta {
   return { title, description, image: image || null };
 }
 
-/** Определяет тип страницы по URL источника */
 export function detectKind(url: string): ContentKind {
-  if (/video\.php/i.test(url)) return 'video';
+  if (/video\.php|embed_video\.php/i.test(url)) return 'video';
   return 'channel';
 }
 
 /**
- * ЭНДПОИНТ-МАППИНГ:
- *  channel.php?x -> embed.php?x
- *  video.php?x   -> embed_video.php?x
- * Query-строка сохраняется полностью.
+ * Достаёт slug канала из любого URL источника:
+ *   /channel.php?slug=foo
+ *   /channel-pc.php?slug=foo
+ *   /embed.php?slug=foo
+ *   /foo (path slug)
+ *   ?slug=foo
  */
-export function mapToEmbed(sourceUrl: string): string {
-  const kind = detectKind(sourceUrl);
-  const target = kind === 'video' ? 'embed_video.php' : 'embed.php';
-  return sourceUrl.replace(/(channel|video)\.php/i, target);
-}
+export function extractSlug(sourceUrl: string): string | null {
+  try {
+    const u = new URL(sourceUrl);
+    const fromQuery = u.searchParams.get('slug');
+    if (fromQuery && fromQuery.trim()) return fromQuery.trim();
 
-/** Формирует чистый iframe-код для карточки */
-export function buildIframeCode(embedUrl: string, title: string): string {
-  return `<iframe src="${embedUrl}" title="${title.replace(/"/g, '&quot;')}" frameborder="0" allowfullscreen></iframe>`;
+    // /channel/foo или /embed/foo
+    const m = u.pathname.match(/\/(?:channel|channel-pc|embed|watch)\/([^/?#]+)/i);
+    if (m?.[1]) return decodeURIComponent(m[1]);
+
+    // иногда slug лежит в path после последнего /
+    const parts = u.pathname.split('/').filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last && !/\.php$/i.test(last) && last.length > 1) {
+      return decodeURIComponent(last);
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 /**
- * Извлекает список ссылок на контент (channel.php/video.php) из HTML ленты.
- * Возвращает абсолютные URL без дублей.
+ * ЭНДПОИНТ-МАППИНГ (как в PHP embed.php):
+ *   любой channel/video URL → /embed.php?slug=SLUG&cinema=0
+ *
+ * cinema=0 / raw=1 — чистый плеер (Playerjs / HLS / iframe VK|YouTube|Twitch),
+ * без cinema-лендинга. Иначе в iframe прилетает обёртка и «не тот» плеер.
+ */
+export function mapToEmbed(sourceUrl: string): string {
+  try {
+    const u = new URL(sourceUrl);
+    const origin = u.origin;
+    const kind = detectKind(sourceUrl);
+
+    if (kind === 'video') {
+      // video.php?id=… → embed_video.php?id=… (если так заведено на источнике)
+      if (/video\.php/i.test(u.pathname)) {
+        u.pathname = u.pathname.replace(/video\.php/i, 'embed_video.php');
+        return u.toString();
+      }
+      return sourceUrl;
+    }
+
+    const slug = extractSlug(sourceUrl);
+    if (slug) {
+      // Рабочий raw-embed как в оригинальном PHP
+      return `${origin}/embed.php?slug=${encodeURIComponent(slug)}&cinema=0`;
+    }
+
+    // fallback: старое поведение channel.php → embed.php
+    if (/(channel|channel-pc)\.php/i.test(u.pathname)) {
+      u.pathname = u.pathname.replace(/(channel|channel-pc)\.php/i, 'embed.php');
+      u.searchParams.set('cinema', '0');
+      return u.toString();
+    }
+
+    // уже embed.php — форсируем cinema=0
+    if (/embed\.php/i.test(u.pathname)) {
+      u.searchParams.set('cinema', '0');
+      return u.toString();
+    }
+
+    return sourceUrl;
+  } catch {
+    return sourceUrl;
+  }
+}
+
+export function buildIframeCode(embedUrl: string, title: string): string {
+  return `<iframe src="${embedUrl}" title="${title.replace(/"/g, '&quot;')}" frameborder="0" allowfullscreen referrerpolicy="no-referrer" allow="autoplay; encrypted-media; picture-in-picture; fullscreen"></iframe>`;
+}
+
+/**
+ * Извлекает список ссылок на контент (channel.php / ?slug= / channel-pc.php) из HTML ленты.
  */
 export function extractContentLinks(html: string, baseUrl: string): string[] {
   const $ = cheerio.load(html);
@@ -89,21 +142,32 @@ export function extractContentLinks(html: string, baseUrl: string): string[] {
 
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') ?? '';
-    if (/(channel|video)\.php/i.test(href)) {
-      try {
-        links.add(new URL(href, baseUrl).toString());
-      } catch {
-        /* невалидный URL — пропускаем */
-      }
+    if (!/(channel|video|embed|slug=)/i.test(href)) return;
+    try {
+      const abs = new URL(href, baseUrl).toString();
+      // предпочитаем страницы канала, не embed
+      if (/embed\.php/i.test(abs) && !/channel/i.test(abs)) return;
+      links.add(abs);
+    } catch {
+      /* skip */
     }
   });
 
-  // Fallback-regex, если разметка кривая
   if (links.size === 0) {
-    const re = /(?:channel|video)\.php\?[A-Za-z0-9_=&%.\-]+/gi;
+    const re = /(?:channel(?:-pc)?|video)\.php\?[A-Za-z0-9_=&%.\-]+/gi;
     for (const m of html.match(re) ?? []) {
       try {
         links.add(new URL(m, baseUrl).toString());
+      } catch {
+        /* noop */
+      }
+    }
+    // slug-only links
+    const slugRe = /[?&]slug=([A-Za-z0-9_\-%]+)/gi;
+    let sm: RegExpExecArray | null;
+    while ((sm = slugRe.exec(html)) !== null) {
+      try {
+        links.add(new URL(`/channel.php?slug=${sm[1]}`, baseUrl).toString());
       } catch {
         /* noop */
       }
