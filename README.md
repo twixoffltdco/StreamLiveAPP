@@ -146,7 +146,7 @@ FEED_LIMIT=12
 
 ## 📄 Лицензия
 
-[MIT](LICENSE) © [year] [fullname]
+[MIT](LICENSE) © 2026 Twixoff
 
 ---
 
