@@ -14,7 +14,6 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { unstable_cache } from 'next/cache';
 import type { StreamContent } from './types';
-import { FOREVER_REVALIDATE } from './config';
 
 const ARCHIVE_DIR = path.join(process.cwd(), 'data');
 const ARCHIVE_FILE = path.join(ARCHIVE_DIR, 'archive.json');
@@ -69,13 +68,14 @@ export async function persistToArchive(items: StreamContent[]): Promise<void> {
 
 /**
  * Публичная обёртка unstable_cache: кэш одного контента по его URL.
- * revalidate: 1 год — фактически "навсегда" для стримингового архива.
+ * revalidate: false — однажды спаршенные метаданные (title, description,
+ * og:image) сохраняются в Next.js НАВСЕГДА, даже если источник умрёт.
  */
 export function foreverCachePage<T extends { sourceUrl: string }>(
   fn: (sourceUrl: string) => Promise<T>,
 ) {
   return unstable_cache(fn, ['streamlive-page'], {
-    revalidate: FOREVER_REVALIDATE,
+    revalidate: false,
     tags: ['streamlive'],
   });
 }
