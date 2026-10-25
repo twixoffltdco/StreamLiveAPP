@@ -35,3 +35,36 @@ export interface FeedResult {
   /** Причина отказа (для экрана "Технические работы") */
   error?: string;
 }
+
+/** Одна тема форума в списке (/forum) */
+export interface ForumThreadSummary {
+  /** Числовой id темы на источнике */
+  id: string;
+  /** Заголовок темы (реальный, спаршенный) */
+  title: string;
+  /** Абсолютная ссылка на тему на источнике */
+  href: string;
+}
+
+/** Список тем форума */
+export interface ForumThreadList {
+  threads: ForumThreadSummary[];
+  origin: 'prod' | 'reserve';
+  allFailed: boolean;
+  error?: string;
+}
+
+/** Полная тема форума (/forum/[id]) с очищенным содержимым */
+export interface ForumThread {
+  id: string;
+  title: string;
+  description: string;
+  image: string | null;
+  /** Санитизированный HTML постов (без script/style/form/iframe) */
+  postsHtml: string;
+  /** Плоский читабельный текст темы */
+  plainText: string;
+  sourceUrl: string;
+  origin: 'prod' | 'reserve';
+  cachedAt: string;
+}
