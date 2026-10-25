@@ -1,22 +1,36 @@
 /**
- * lib/fetcher.ts — серверный фетчер StreamLive.
+ * lib/fetcher.ts — серверный фетчер агрегатора StreamLive.
  *
- * Ключевая логика:
- *  1. FAILOVER: сначала Prod (streamlivetv.freedev.app), при таймауте >3 сек
- *     или ошибке 5xx мгновенно переключаемся на Reserve (domtv.blyz.ru).
- *  2. УМНЫЙ ПАРСИНГ: обход JS-защиты (см. challenge.ts) + Cheerio извлечение
- *     title/description/og:image + endpoint-маппинг channel.php -> embed.php.
- *  3. ВЕЧНЫЙ КЭШ: unstable_cache + файловый архив data/archive.json.
+ * Стратегия (чтобы InfinityFree не лёг):
+ *  1. Сначала отдаём ВЕЧНЫЙ АРХИВ / memory-снимок.
+ *  2. Не чаще FEED_REFRESH_SEC ходим на PHP за списком ссылок.
+ *  3. Парсим только НОВЫЕ slug (нет в архиве), макс MAX_NEW_SCRAPE_PER_RUN,
+ *     с паузой SCRAPE_DELAY_MS между запросами.
+ *  4. Старые карточки живут в копии навсегда, даже если PHP мёртв.
  */
 
 import { createHash } from 'crypto';
-import { FEED_LIMIT, PROD_BASE, RESERVE_BASE } from './config';
+import {
+  FEED_LIMIT,
+  FEED_REFRESH_SEC,
+  MAX_NEW_SCRAPE_PER_RUN,
+  PROD_BASE,
+  RESERVE_BASE,
+  SCRAPE_DELAY_MS,
+} from './config';
 import { fetchWithChallenge } from './challenge';
 import { detectKind, extractContentLinks, extractVideoLinks, mapToEmbed, parseMeta } from './parse';
-import { contentId, foreverCachePage, getArchivedItems, persistToArchive } from './cache';
+import {
+  contentId,
+  foreverCachePage,
+  getArchivedIdSet,
+  getArchivedItems,
+  getMemoryFeed,
+  persistToArchive,
+  setMemoryFeed,
+} from './cache';
 import type { FeedResult, StreamContent } from './types';
 
-/** Ошибка источника с признаком "стоит попробовать резерв" */
 class SourceError extends Error {
   recoverable: boolean;
   constructor(message: string, recoverable = true) {
@@ -25,11 +39,13 @@ class SourceError extends Error {
   }
 }
 
-/**
- * Пробует базовый URL: сначала Prod, при таймауте/5xx — Reserve.
- * Возвращает { html, origin }. Бросает SourceError, если оба мертвы.
- */
-async function fetchPageFailover(pathname: string): Promise<{ html: string; origin: 'prod' | 'reserve'; finalUrl: string }> {
+async function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function fetchPageFailover(
+  pathname: string,
+): Promise<{ html: string; origin: 'prod' | 'reserve'; finalUrl: string }> {
   const bases: Array<{ url: string; origin: 'prod' | 'reserve' }> = [
     { url: `${PROD_BASE}${pathname}`, origin: 'prod' },
     { url: `${RESERVE_BASE}${pathname}`, origin: 'reserve' },
@@ -42,28 +58,23 @@ async function fetchPageFailover(pathname: string): Promise<{ html: string; orig
       return { html, origin: base.origin, finalUrl };
     } catch (e) {
       lastError = e as Error;
-      console.warn(`[fetcher] ${base.origin} (${base.url}) недоступен:`, lastError.message);
-      // Таймаут / 5xx / сетевая ошибка => failover на следующий источник
-      continue;
+      console.warn(`[fetcher] ${base.origin} недоступен:`, lastError.message);
     }
   }
-
   throw new SourceError(lastError?.message ?? 'Оба источника недоступны');
 }
 
-/** Парсит одну страницу контента и собирает карточку StreamContent */
 async function scrapeContent(sourceUrl: string): Promise<StreamContent> {
-  const { html, origin } = await fetchPageFailover(new URL(sourceUrl).pathname + new URL(sourceUrl).search);
-
+  const u = new URL(sourceUrl);
+  const { html, origin } = await fetchPageFailover(u.pathname + u.search);
   const meta = parseMeta(html);
   if (!meta.title) {
-    throw new SourceError(`Не удалось извлечь <title> из ${sourceUrl}`, false);
+    throw new SourceError(`Нет <title> у ${sourceUrl}`, false);
   }
-
   return {
     id: contentId(sourceUrl),
     title: meta.title,
-    description: meta.description || 'Прямой эфир без описания — смотрите в плеере.',
+    description: meta.description || 'Без описания — смотрите в плеере.',
     image: meta.image,
     sourceUrl,
     embedUrl: mapToEmbed(sourceUrl),
@@ -73,187 +84,172 @@ async function scrapeContent(sourceUrl: string): Promise<StreamContent> {
   };
 }
 
-/** Кэшированная навсегда версия scrapeContent (unstable_cache, revalidate = 1 год) */
 const scrapeContentCached = foreverCachePage(scrapeContent);
 
-/**
- * Собирает ленту: индексная страница источника -> ссылки на channel/video.php ->
- * параллельный парсинг метаданных каждой страницы -> вечный кэш.
- */
-export async function fetchFeed(limit = FEED_LIMIT): Promise<FeedResult> {
-  try {
-    // 1. Индексная страница с failover
-    const { html: indexHtml } = await fetchPageFailover('/');
-
-    // 2. Реальные ссылки на контент со страницы источника
-    const links = extractContentLinks(indexHtml, PROD_BASE);
-
-    // Если на индексе нет прямых ссылок (источник отдаёт SPA-разметку) —
-    // пробуем известные страницы-каталоги того же сайта.
-    const candidates = links.length > 0 ? links : [];
-
-    // 3. Параллельный парсинг (каждая страница через вечный кэш)
-    const settled = await Promise.allSettled(
-      candidates.slice(0, limit).map((url) => scrapeContentCached(url)),
-    );
-
-    const items: StreamContent[] = [];
-    for (const s of settled) {
-      if (s.status === 'fulfilled') items.push(s.value);
-    }
-
-    // 4. Сохраняем в вечный файловый архив
-    void persistToArchive(items);
-
-    if (items.length === 0) {
-      // Ни одной распаршенной карточки — достраиваем ленту из архива
-      const archived = await getArchivedItems(limit);
-      if (archived.length > 0) {
-        return { items: archived, allFailed: false };
-      }
-      return {
-        items: [],
-        allFailed: true,
-        error: 'Источник доступен, но не вернул ни одной страницы контента.',
-      };
-    }
-
-    return { items, allFailed: false };
-  } catch (e) {
-    // Оба сервера упали — сначала пытаемся отдать ВЕЧНЫЙ АРХИВ
-    const archived = await getArchivedItems(limit);
-    if (archived.length > 0) {
-      return { items: archived, allFailed: false };
-    }
-    return {
-      items: [],
-      allFailed: true,
-      error: (e as Error).message || 'Техническая ошибка источника',
-    };
+/** Последовательный парсе только новых URL */
+async function scrapeNewOnly(links: string[], knownIds: Set<string>): Promise<StreamContent[]> {
+  const fresh: string[] = [];
+  for (const url of links) {
+    const id = contentId(url);
+    if (!knownIds.has(id)) fresh.push(url);
   }
+
+  const toFetch = fresh.slice(0, MAX_NEW_SCRAPE_PER_RUN);
+  const out: StreamContent[] = [];
+
+  for (let i = 0; i < toFetch.length; i++) {
+    try {
+      const item = await scrapeContentCached(toFetch[i]);
+      out.push(item);
+      knownIds.add(item.id);
+    } catch (e) {
+      console.warn('[fetcher] scrape fail', toFetch[i], (e as Error).message);
+    }
+    if (i < toFetch.length - 1) await sleep(SCRAPE_DELAY_MS);
+  }
+  return out;
+}
+
+function mergeById(primary: StreamContent[], secondary: StreamContent[]): StreamContent[] {
+  const map = new Map<string, StreamContent>();
+  for (const it of secondary) map.set(it.id, it);
+  for (const it of primary) map.set(it.id, it); // primary wins
+  return Array.from(map.values()).sort((a, b) => (a.cachedAt < b.cachedAt ? 1 : -1));
 }
 
 /**
- * Поиск: сканирует реальную выдачу источника по query + архив кэшированных
- * когда-либо спаршенных карточек (без моков).
+ * Лента каналов: архив-first, редкий soft-refresh с PHP.
+ */
+export async function fetchFeed(limit = FEED_LIMIT): Promise<FeedResult> {
+  // 1) Быстрый memory-снимок (без PHP)
+  const mem = getMemoryFeed(FEED_REFRESH_SEC);
+  if (mem && mem.length > 0) {
+    return { items: mem.slice(0, limit), allFailed: false };
+  }
+
+  // 2) Вечный архив
+  const archived = await getArchivedItems(Math.max(limit * 3, 50));
+  const known = await getArchivedIdSet();
+
+  // 3) Редкий запрос списка ссылок на PHP
+  try {
+    const { html: indexHtml } = await fetchPageFailover('/');
+    const links = extractContentLinks(indexHtml, PROD_BASE);
+
+    const newly = await scrapeNewOnly(links, known);
+    if (newly.length) void persistToArchive(newly);
+
+    // карточки по известным ссылкам — из архива / кэша (без лишних хитов)
+    const fromArchive: StreamContent[] = [];
+    const archMap = new Map((await getArchivedItems(5000)).map((i) => [i.id, i]));
+    for (const url of links) {
+      const id = contentId(url);
+      const hit = archMap.get(id);
+      if (hit) fromArchive.push(hit);
+    }
+
+    const merged = mergeById(newly, fromArchive.length ? fromArchive : archived).slice(0, limit);
+    if (merged.length) {
+      setMemoryFeed(merged);
+      void persistToArchive(merged);
+      return { items: merged, allFailed: false };
+    }
+  } catch (e) {
+    console.warn('[fetcher] refresh fail, archive only:', (e as Error).message);
+  }
+
+  if (archived.length > 0) {
+    setMemoryFeed(archived.slice(0, limit));
+    return { items: archived.slice(0, limit), allFailed: false };
+  }
+
+  return {
+    items: [],
+    allFailed: true,
+    error: 'Нет архива и источники недоступны',
+  };
+}
+
+/**
+ * Раздел видео (VOD + стримы с /videos.php) — та же схема.
+ */
+export async function fetchVideosFeed(limit = FEED_LIMIT): Promise<FeedResult> {
+  const memKey = getMemoryFeed(FEED_REFRESH_SEC);
+  // memory общий — для videos лучше всегда пробовать архив+soft
+
+  const archivedAll = await getArchivedItems(5000);
+  const archived = archivedAll.slice(0, limit * 2);
+  const known = await getArchivedIdSet();
+
+  try {
+    let links: string[] = [];
+    for (const path of ['/videos.php', '/videos']) {
+      try {
+        const { html } = await fetchPageFailover(path);
+        links = Array.from(
+          new Set([...extractVideoLinks(html, PROD_BASE), ...extractContentLinks(html, PROD_BASE)]),
+        );
+        if (links.length) break;
+      } catch {
+        /* next */
+      }
+    }
+
+    const newly = await scrapeNewOnly(links, known);
+    if (newly.length) void persistToArchive(newly);
+
+    const archMap = new Map(archivedAll.map((i) => [i.id, i]));
+    const fromArchive: StreamContent[] = [];
+    for (const url of links) {
+      const hit = archMap.get(contentId(url));
+      if (hit) fromArchive.push(hit);
+    }
+
+    const merged = mergeById(newly, fromArchive.length ? fromArchive : archived).slice(0, limit);
+    if (merged.length) {
+      void persistToArchive(merged);
+      return { items: merged, allFailed: false };
+    }
+  } catch (e) {
+    console.warn('[fetcher] videos refresh fail:', (e as Error).message);
+  }
+
+  if (archived.length > 0) return { items: archived.slice(0, limit), allFailed: false };
+  return { items: [], allFailed: true, error: 'Видео: нет архива и источники недоступны' };
+}
+
+/**
+ * Поиск: только по архиву + мягкий refresh лент (без шторма запросов).
  */
 export async function searchFeed(query: string, limit = FEED_LIMIT): Promise<FeedResult> {
   const raw = query.trim();
   if (!raw) return { items: [], allFailed: false };
-
   const lower = raw.toLowerCase();
-  const found = new Map<string, StreamContent>();
 
-  const addItems = (items: StreamContent[]) => {
+  const found = new Map<string, StreamContent>();
+  const add = (items: StreamContent[]) => {
     for (const it of items) {
       const hay = `${it.title} ${it.description} ${it.sourceUrl}`.toLowerCase();
       if (hay.includes(lower) && !found.has(it.id)) found.set(it.id, it);
     }
   };
 
-  // 1) Живой поиск на источнике (несколько типичных путей PHP)
-  const searchPaths = [
-    `/?s=${encodeURIComponent(raw)}`,
-    `/search.php?q=${encodeURIComponent(raw)}`,
-    `/videos.php?q=${encodeURIComponent(raw)}`,
-    `/channel.php?q=${encodeURIComponent(raw)}`,
-  ];
-  for (const path of searchPaths) {
-    try {
-      const { html } = await fetchPageFailover(path);
-      const links = [
-        ...extractContentLinks(html, PROD_BASE),
-        ...extractVideoLinks(html, PROD_BASE),
-      ];
-      const settled = await Promise.allSettled(
-        links.slice(0, limit).map((url) => scrapeContentCached(url)),
-      );
-      addItems(settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : [])));
-      if (found.size >= limit) break;
-    } catch {
-      /* next path */
-    }
-  }
+  // Сначала архив — 0 хитов на PHP
+  add(await getArchivedItems(10_000));
 
-  // 2) Фильтр по текущей ленте каналов + видео (реальный контент зеркал)
+  // Если мало — один soft-refresh каналов (с лимитом новых)
   if (found.size < limit) {
     try {
-      const [channels, videos] = await Promise.all([
-        fetchFeed(Math.max(limit, 24)),
-        fetchVideosFeed(Math.max(limit, 24)),
-      ]);
-      addItems(channels.items);
-      addItems(videos.items);
+      const feed = await fetchFeed(Math.max(limit, 24));
+      add(feed.items);
     } catch {
       /* ignore */
     }
   }
 
-  // 3) Вечный архив
-  if (found.size < limit) {
-    try {
-      const archived = await getArchivedItems(10_000);
-      addItems(archived);
-    } catch {
-      /* ignore */
-    }
-  }
-
-  const items = Array.from(found.values()).slice(0, limit);
-  void persistToArchive(items);
-  return { items, allFailed: false };
+  return { items: Array.from(found.values()).slice(0, limit), allFailed: false };
 }
 
-/** Хэш для стабильных ключей React (используется в API роуте) */
 export function hashKey(input: string): string {
   return createHash('sha1').update(input).digest('hex').slice(0, 12);
-}
-
-
-/**
- * Лента видео с обоих зеркал: /videos.php → ссылки video.php?slug=…
- * Failover Prod → Reserve, кэш + архив.
- */
-export async function fetchVideosFeed(limit = FEED_LIMIT): Promise<FeedResult> {
-  // Местный видеохостинг: на /videos.php бывают и VOD (video.php), и стримы (channel.php)
-  const paths = ['/videos.php', '/videos'];
-  try {
-    let links: string[] = [];
-    let lastErr = '';
-    for (const path of paths) {
-      try {
-        const { html } = await fetchPageFailover(path);
-        const fromVideo = extractVideoLinks(html, PROD_BASE);
-        const fromAll = extractContentLinks(html, PROD_BASE);
-        // всё, что на странице видео-хостинга: video.php + channel.php со страницы
-        links = Array.from(new Set([...fromVideo, ...fromAll]));
-        if (links.length > 0) break;
-      } catch (e) {
-        lastErr = (e as Error).message;
-      }
-    }
-
-    if (links.length === 0) {
-      const archived = await getArchivedItems(limit * 2);
-      if (archived.length > 0) return { items: archived.slice(0, limit), allFailed: false };
-      return { items: [], allFailed: true, error: lastErr || 'Раздел видео пуст на источниках' };
-    }
-
-    const settled = await Promise.allSettled(
-      links.slice(0, limit).map((url) => scrapeContentCached(url)),
-    );
-    const items = settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []));
-    void persistToArchive(items);
-
-    if (items.length === 0) {
-      const archived = await getArchivedItems(limit * 2);
-      if (archived.length > 0) return { items: archived.slice(0, limit), allFailed: false };
-      return { items: [], allFailed: true, error: 'Не удалось распарсить карточки раздела видео' };
-    }
-    return { items, allFailed: false };
-  } catch (e) {
-    const archived = await getArchivedItems(limit * 2);
-    if (archived.length > 0) return { items: archived.slice(0, limit), allFailed: false };
-    return { items: [], allFailed: true, error: (e as Error).message };
-  }
 }

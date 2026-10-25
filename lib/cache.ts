@@ -1,12 +1,13 @@
 /**
- * lib/cache.ts — вечное кэширование спаршенных данных.
+ * lib/cache.ts — вечная копия спаршенных данных на агрегаторе.
  *
- * Двухуровневая стратегия:
- *  1. Next.js `unstable_cache` (revalidate = 1 год) — метаданные страницы
- *     живут в kV-кэше Next и переживают рестарты на persistent-хостингах.
- *  2. Файловый архив `data/archive.json` — guarantee "навсегда": однажды
- *     спаршенные title/description/image сохраняются на диске и отдаются,
- *     даже если оба сервера-источника умрут окончательно.
+ * Куда сохраняется:
+ *   1) data/archive.json     — диск проекта (если writable)
+ *   2) /tmp/streamlive-archive.json — fallback, если data/ read-only (Layero/Docker)
+ *   3) unstable_cache Next   — мета каждой страницы навсегда (revalidate: false)
+ *   4) memory (process)      — снимок ленты между запросами одного инстанса
+ *
+ * Даже если PHP/InfinityFree лежит — отдаём архив.
  */
 
 import { createHash } from 'crypto';
@@ -15,38 +16,78 @@ import path from 'path';
 import { unstable_cache } from 'next/cache';
 import type { StreamContent } from './types';
 
-const ARCHIVE_DIR = path.join(process.cwd(), 'data');
-const ARCHIVE_FILE = path.join(ARCHIVE_DIR, 'archive.json');
+const ARCHIVE_CANDIDATES = [
+  path.join(process.cwd(), 'data', 'archive.json'),
+  path.join('/tmp', 'streamlive-archive.json'),
+];
+
+/** In-memory mirror (живёт, пока жив процесс Node) */
+let memoryArchive: Record<string, StreamContent> = {};
+let memoryFeedAt = 0;
+let memoryFeedItems: StreamContent[] = [];
 
 /** Стабильный id карточки = md5 от исходного URL */
 export function contentId(sourceUrl: string): string {
   return createHash('md5').update(sourceUrl).digest('hex').slice(0, 16);
 }
 
-/** Читает файловый архив с диска (пустой, если файла ещё нет) */
-async function readArchive(): Promise<Record<string, StreamContent>> {
+async function tryReadFile(file: string): Promise<Record<string, StreamContent> | null> {
   try {
-    const raw = await fs.readFile(ARCHIVE_FILE, 'utf8');
+    const raw = await fs.readFile(file, 'utf8');
     return JSON.parse(raw) as Record<string, StreamContent>;
   } catch {
-    return {};
+    return null;
   }
 }
 
-/** Писатель архива: атомарная перезапись + merge */
+/** Читает архив: memory → data/ → /tmp/ */
+async function readArchive(): Promise<Record<string, StreamContent>> {
+  if (Object.keys(memoryArchive).length > 0) {
+    // подмешиваем диск, если там больше записей
+    for (const file of ARCHIVE_CANDIDATES) {
+      const disk = await tryReadFile(file);
+      if (disk) {
+        memoryArchive = { ...disk, ...memoryArchive };
+        break;
+      }
+    }
+    return { ...memoryArchive };
+  }
+
+  for (const file of ARCHIVE_CANDIDATES) {
+    const disk = await tryReadFile(file);
+    if (disk && Object.keys(disk).length > 0) {
+      memoryArchive = disk;
+      return { ...disk };
+    }
+  }
+  return {};
+}
+
 async function writeArchive(items: StreamContent[]): Promise<void> {
   const existing = await readArchive();
   for (const item of items) existing[item.id] = item;
-  await fs.mkdir(ARCHIVE_DIR, { recursive: true });
-  const tmp = ARCHIVE_FILE + '.tmp';
-  await fs.writeFile(tmp, JSON.stringify(existing, null, 2), 'utf8');
-  await fs.rename(tmp, ARCHIVE_FILE);
+  memoryArchive = existing;
+
+  const payload = JSON.stringify(existing);
+  let written = false;
+  for (const file of ARCHIVE_CANDIDATES) {
+    try {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      const tmp = file + '.tmp';
+      await fs.writeFile(tmp, payload, 'utf8');
+      await fs.rename(tmp, file);
+      written = true;
+      break;
+    } catch {
+      /* next candidate */
+    }
+  }
+  if (!written) {
+    console.warn('[cache] Диск недоступен — архив только в memory + unstable_cache');
+  }
 }
 
-/**
- * Архивные fallback-данные: если живой парсинг не удался,
- * лента достраивается из того, что уже было сохранено навсегда.
- */
 export async function getArchivedItems(limit: number): Promise<StreamContent[]> {
   const archive = await readArchive();
   return Object.values(archive)
@@ -54,22 +95,40 @@ export async function getArchivedItems(limit: number): Promise<StreamContent[]> 
     .slice(0, limit);
 }
 
-/** Сохраняет успешно спаршенное в вечный архив */
+export async function getArchivedById(id: string): Promise<StreamContent | null> {
+  const archive = await readArchive();
+  return archive[id] ?? null;
+}
+
+/** Все id, которые уже есть в вечной копии */
+export async function getArchivedIdSet(): Promise<Set<string>> {
+  const archive = await readArchive();
+  return new Set(Object.keys(archive));
+}
+
 export async function persistToArchive(items: StreamContent[]): Promise<void> {
   if (items.length === 0) return;
   try {
     await writeArchive(items);
   } catch (e) {
-    // На read-only FS (например Vercel serverless) файловый уровень недоступен —
-    // остаётся только unstable_cache, это не критично.
     console.warn('[cache] Не удалось записать архив:', (e as Error).message);
   }
 }
 
+/** Снимок ленты в memory (чтобы не долбить PHP на каждый F5) */
+export function getMemoryFeed(maxAgeSec: number): StreamContent[] | null {
+  if (!memoryFeedItems.length) return null;
+  if (Date.now() - memoryFeedAt > maxAgeSec * 1000) return null;
+  return memoryFeedItems;
+}
+
+export function setMemoryFeed(items: StreamContent[]): void {
+  memoryFeedItems = items;
+  memoryFeedAt = Date.now();
+}
+
 /**
- * Публичная обёртка unstable_cache: кэш одного контента по его URL.
- * revalidate: false — однажды спаршенные метаданные (title, description,
- * og:image) сохраняются в Next.js НАВСЕГДА, даже если источник умрёт.
+ * Мета одной страницы — навсегда в Next cache.
  */
 export function foreverCachePage<T extends { sourceUrl: string }>(
   fn: (sourceUrl: string) => Promise<T>,

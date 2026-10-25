@@ -227,19 +227,10 @@ export async function fetchContentBySourceUrl(sourceUrl: string): Promise<Stream
   }
 }
 
-/** Находит карточку в вечном архиве по её id (md5 от исходного URL) */
+/** Карточка по id — только из вечной копии (без хита на PHP при каждом /watch). */
 export async function fetchContentById(id: string): Promise<StreamContent | null> {
   const archived = await getArchivedItems(10_000);
-  const byId = archived.find((i) => i.id === id);
-  if (!byId) return null;
-  // Пытаемся освежить живой страницей, но при отказе отдаём вечную копию
-  try {
-    const fresh = await scrapeContentForever(byId.sourceUrl);
-    void persistToArchive([fresh]);
-    return fresh;
-  } catch {
-    return byId;
-  }
+  return archived.find((i) => i.id === id) ?? null;
 }
 
 /** Хэш для стабильных ключей (совпадает с id карточек) */
