@@ -93,10 +93,12 @@ export function mapToEmbed(sourceUrl: string): string {
   try {
     const u = new URL(sourceUrl);
     const origin = u.origin;
+    const slug = extractSlug(sourceUrl);
     const kind = detectKind(sourceUrl);
 
+    // ВИДЕО → embed_video.php?slug=… (PHP VOD)
     if (kind === 'video') {
-      // video.php?id=… → embed_video.php?id=… (если так заведено на источнике)
+      if (slug) return `${origin}/embed_video.php?slug=${encodeURIComponent(slug)}`;
       if (/video\.php/i.test(u.pathname)) {
         u.pathname = u.pathname.replace(/video\.php/i, 'embed_video.php');
         return u.toString();
@@ -104,25 +106,20 @@ export function mapToEmbed(sourceUrl: string): string {
       return sourceUrl;
     }
 
-    const slug = extractSlug(sourceUrl);
+    // КАНАЛ → всегда embed.php?slug=…&cinema=0 (не catalog, не cinema-лендинг)
     if (slug) {
-      // Рабочий raw-embed как в оригинальном PHP
       return `${origin}/embed.php?slug=${encodeURIComponent(slug)}&cinema=0`;
     }
-
-    // fallback: старое поведение channel.php → embed.php
     if (/(channel|channel-pc)\.php/i.test(u.pathname)) {
       u.pathname = u.pathname.replace(/(channel|channel-pc)\.php/i, 'embed.php');
       u.searchParams.set('cinema', '0');
+      // убираем мусорные query кроме slug если был
       return u.toString();
     }
-
-    // уже embed.php — форсируем cinema=0
     if (/embed\.php/i.test(u.pathname)) {
       u.searchParams.set('cinema', '0');
       return u.toString();
     }
-
     return sourceUrl;
   } catch {
     return sourceUrl;
@@ -142,27 +139,38 @@ export function extractContentLinks(html: string, baseUrl: string): string[] {
 
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') ?? '';
-    if (!/(channel|video|embed|slug=)/i.test(href)) return;
+    // для ленты каналов — только channel.php / channel-pc.php
+    if (!/(channel(?:-pc)?\.php)/i.test(href) && !/[?&]slug=/i.test(href)) return;
+    if (/video\.php|videos\.php|forum|catalog/i.test(href)) return;
     try {
       const abs = new URL(href, baseUrl).toString();
-      // предпочитаем страницы канала, не embed
-      if (/embed\.php/i.test(abs) && !/channel/i.test(abs)) return;
-      links.add(abs);
+      if (/embed\.php/i.test(abs)) return;
+      if (/video\.php/i.test(abs)) return;
+      // нормализуем к channel.php?slug=
+      const slug = extractSlug(abs);
+      if (slug) {
+        const origin = new URL(abs).origin;
+        links.add(`${origin}/channel.php?slug=${encodeURIComponent(slug)}`);
+      } else {
+        links.add(abs);
+      }
     } catch {
       /* skip */
     }
   });
 
   if (links.size === 0) {
-    const re = /(?:channel(?:-pc)?|video)\.php\?[A-Za-z0-9_=&%.\-]+/gi;
+    const re = /channel(?:-pc)?\.php\?[A-Za-z0-9_=&%.\-]+/gi;
     for (const m of html.match(re) ?? []) {
       try {
-        links.add(new URL(m, baseUrl).toString());
+        const abs = new URL(m, baseUrl).toString();
+        const slug = extractSlug(abs);
+        if (slug) links.add(`${new URL(abs).origin}/channel.php?slug=${encodeURIComponent(slug)}`);
+        else links.add(abs);
       } catch {
         /* noop */
       }
     }
-    // slug-only links
     const slugRe = /[?&]slug=([A-Za-z0-9_\-%]+)/gi;
     let sm: RegExpExecArray | null;
     while ((sm = slugRe.exec(html)) !== null) {
@@ -223,19 +231,32 @@ export function extractVideoLinks(html: string, baseUrl: string): string[] {
 
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') ?? '';
+    // СТРОГО только video.php (не channel, не videos.php, не catalog)
     if (!/video\.php/i.test(href)) return;
+    if (/videos\.php|channel\.php|forum|catalog/i.test(href)) return;
     try {
-      links.add(new URL(href, baseUrl).toString());
+      const abs = new URL(href, baseUrl).toString();
+      if (!/video\.php/i.test(abs)) return;
+      const slug = extractSlug(abs);
+      if (slug) {
+        links.add(`${new URL(abs).origin}/video.php?slug=${encodeURIComponent(slug)}`);
+      } else {
+        links.add(abs);
+      }
     } catch {
       /* skip */
     }
   });
 
   if (links.size === 0) {
-    const re = /video\.php\?[A-Za-z0-9_=&%.\-]+/gi;
+    const re = /video\.php\?[^"'\s<>]*slug=[A-Za-z0-9_\-%]+[^"'\s<>]*/gi;
     for (const m of html.match(re) ?? []) {
       try {
-        links.add(new URL(m, baseUrl).toString());
+        const abs = new URL(m, baseUrl).toString();
+        if (/videos\.php/i.test(abs)) continue;
+        const slug = extractSlug(abs);
+        if (slug) links.add(`${new URL(abs).origin}/video.php?slug=${encodeURIComponent(slug)}`);
+        else links.add(abs);
       } catch {
         /* noop */
       }
