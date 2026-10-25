@@ -1,11 +1,35 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
-/** Метаданные приложения (реальные домены источников указаны в README) */
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://streamlive.layero.dev';
+
 export const metadata: Metadata = {
-  title: 'StreamLive — смотри всё',
+  metadataBase: new URL(siteUrl),
+  title: {
+    default: 'StreamLive — смотри всё',
+    template: '%s · StreamLive',
+  },
   description:
-    'Open Source архив живого ТВ и VOD: парсинг, вечный кэш, TikTok-style интерфейс. Без мок-данных — только реальный контент.',
+    'Архив живого ТВ и VOD: каналы, видео и форум StreamLive. Парсинг, вечный кэш, SEO-страницы.',
+  openGraph: {
+    type: 'website',
+    locale: 'ru_RU',
+    url: siteUrl,
+    siteName: 'StreamLive',
+    title: 'StreamLive — смотри всё',
+    description: 'Каналы, видео и форум StreamLive с вечным кэшем.',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'StreamLive — смотри всё',
+    description: 'Каналы, видео и форум StreamLive.',
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: { index: true, follow: true },
+  },
+  alternates: { canonical: siteUrl },
 };
 
 export const viewport: Viewport = {
@@ -15,10 +39,6 @@ export const viewport: Viewport = {
   maximumScale: 1,
 };
 
-/**
- * Корневой layout. Чистый Server Component:
- * pure black фон + full-height для scroll-snap ленты.
- */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="ru" className="bg-black">

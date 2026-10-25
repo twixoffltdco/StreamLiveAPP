@@ -12,6 +12,7 @@ import Image from 'next/image';
 import type { StreamContent } from '@/lib/types';
 import StreamPlayer from '@/components/StreamPlayer';
 import { PROD_BASE } from '@/lib/config';
+import { mapToChannelPage, mapToVideoPage } from '@/lib/parse';
 
 function PipGlyph({ className }: { className?: string }) {
   return (
@@ -40,7 +41,9 @@ export default function VideoCard({ item }: { item: StreamContent }) {
   const embedUrl = useMemo(() => withCinemaZero(item.embedUrl || item.sourceUrl), [item.embedUrl, item.sourceUrl]);
 
   async function handleShare() {
-    const shareData = { title: item.title, text: item.description, url: item.sourceUrl };
+    const pageUrl =
+      item.kind === 'video' ? mapToVideoPage(item.sourceUrl) : mapToChannelPage(item.sourceUrl);
+    const shareData = { title: item.title, text: item.description, url: pageUrl || item.sourceUrl };
     try {
       if (navigator.share) await navigator.share(shareData);
       else await navigator.clipboard.writeText(item.sourceUrl);
@@ -56,7 +59,12 @@ export default function VideoCard({ item }: { item: StreamContent }) {
   }
 
   function openOnSource() {
-    window.open(embedUrl || item.sourceUrl, '_blank', 'noopener,noreferrer');
+    // Канал → channel.php?slug=…  |  Видео → video.php?slug=…  (не catalog)
+    const page =
+      item.kind === 'video'
+        ? mapToVideoPage(item.sourceUrl)
+        : mapToChannelPage(item.sourceUrl);
+    window.open(page || embedUrl || item.sourceUrl, '_blank', 'noopener,noreferrer');
   }
 
   // База для playerjs.js — origin embed-источника

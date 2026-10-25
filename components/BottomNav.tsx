@@ -1,15 +1,12 @@
 'use client';
 
-/**
- * BottomNav — нижняя стеклянная навигация (Home / Search / Forum / + / Profile).
- */
-
-import { Home, Search, Plus, User, MessagesSquare } from 'lucide-react';
+import { Home, Search, Plus, User, MessagesSquare, Film } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
 const items = [
-  { href: '/', label: 'Главная', Icon: Home },
+  { href: '/', label: 'Каналы', Icon: Home },
+  { href: '/videos', label: 'Видео', Icon: Film },
   { href: '/search', label: 'Поиск', Icon: Search },
   { href: '/forum', label: 'Форум', Icon: MessagesSquare },
   { href: '/add', label: '', Icon: Plus, accent: true },
@@ -21,7 +18,7 @@ export default function BottomNav() {
 
   return (
     <nav className="fixed inset-x-0 bottom-0 z-50 flex justify-center pb-[max(env(safe-area-inset-bottom),12px)]">
-      <div className="glass mx-4 flex w-full max-w-md items-center justify-around rounded-2xl px-2 py-2 shadow-neon-cyan">
+      <div className="glass mx-2 flex w-full max-w-lg items-center justify-around rounded-2xl px-1 py-2 shadow-neon-cyan">
         {items.map(({ href, label, Icon, accent }) => {
           const active = pathname === href || (href !== '/' && pathname.startsWith(href));
 
@@ -31,9 +28,9 @@ export default function BottomNav() {
                 key={href}
                 href={href}
                 aria-label="Добавить"
-                className="flex h-11 w-12 items-center justify-center rounded-xl bg-gradient-to-r from-neon-cyan to-neon-pink text-black transition-transform active:scale-90"
+                className="flex h-10 w-11 items-center justify-center rounded-xl bg-gradient-to-r from-neon-cyan to-neon-pink text-black transition-transform active:scale-90"
               >
-                <Icon className="h-6 w-6 stroke-[3]" />
+                <Icon className="h-5 w-5 stroke-[3]" />
               </Link>
             );
           }
@@ -42,12 +39,12 @@ export default function BottomNav() {
             <Link
               key={href}
               href={href}
-              className={`flex flex-col items-center gap-0.5 rounded-xl px-2 py-1 transition-colors ${
+              className={`flex flex-col items-center gap-0.5 rounded-xl px-1.5 py-1 transition-colors ${
                 active ? 'text-neon-cyan' : 'text-white/60 hover:text-white'
               }`}
             >
               <Icon className="h-5 w-5" strokeWidth={active ? 2.5 : 2} />
-              <span className="text-[10px] font-semibold">{label}</span>
+              <span className="text-[9px] font-semibold">{label}</span>
             </Link>
           );
         })}

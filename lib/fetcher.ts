@@ -12,7 +12,7 @@
 import { createHash } from 'crypto';
 import { FEED_LIMIT, PROD_BASE, RESERVE_BASE } from './config';
 import { fetchWithChallenge } from './challenge';
-import { detectKind, extractContentLinks, mapToEmbed, parseMeta } from './parse';
+import { detectKind, extractContentLinks, extractVideoLinks, mapToEmbed, parseMeta } from './parse';
 import { contentId, foreverCachePage, getArchivedItems, persistToArchive } from './cache';
 import type { FeedResult, StreamContent } from './types';
 
@@ -163,4 +163,57 @@ export async function searchFeed(query: string, limit = FEED_LIMIT): Promise<Fee
 /** Хэш для стабильных ключей React (используется в API роуте) */
 export function hashKey(input: string): string {
   return createHash('sha1').update(input).digest('hex').slice(0, 12);
+}
+
+
+/**
+ * Лента видео с обоих зеркал: /videos.php → ссылки video.php?slug=…
+ * Failover Prod → Reserve, кэш + архив.
+ */
+export async function fetchVideosFeed(limit = FEED_LIMIT): Promise<FeedResult> {
+  const paths = ['/videos.php', '/videos', '/video.php'];
+  try {
+    let links: string[] = [];
+    let lastErr = '';
+    for (const path of paths) {
+      try {
+        const { html } = await fetchPageFailover(path);
+        links = extractVideoLinks(html, PROD_BASE);
+        if (links.length === 0) {
+          // запасной путь — общие content-ссылки только video
+          links = extractContentLinks(html, PROD_BASE).filter((u) => /video\.php/i.test(u));
+        }
+        if (links.length > 0) break;
+      } catch (e) {
+        lastErr = (e as Error).message;
+      }
+    }
+
+    if (links.length === 0) {
+      const archived = (await getArchivedItems(limit * 3)).filter((i) => i.kind === 'video');
+      if (archived.length > 0) return { items: archived.slice(0, limit), allFailed: false };
+      return { items: [], allFailed: true, error: lastErr || 'Видео не найдены на источниках' };
+    }
+
+    const settled = await Promise.allSettled(
+      links.slice(0, limit).map((url) => scrapeContentCached(url)),
+    );
+    const items = settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []));
+    // помечаем kind video если удалось
+    for (const it of items) {
+      if (/video/i.test(it.sourceUrl)) (it as StreamContent).kind = 'video';
+    }
+    void persistToArchive(items);
+
+    if (items.length === 0) {
+      const archived = (await getArchivedItems(limit * 3)).filter((i) => i.kind === 'video');
+      if (archived.length > 0) return { items: archived.slice(0, limit), allFailed: false };
+      return { items: [], allFailed: true, error: 'Не удалось распарсить карточки видео' };
+    }
+    return { items, allFailed: false };
+  } catch (e) {
+    const archived = (await getArchivedItems(limit * 3)).filter((i) => i.kind === 'video');
+    if (archived.length > 0) return { items: archived.slice(0, limit), allFailed: false };
+    return { items: [], allFailed: true, error: (e as Error).message };
+  }
 }

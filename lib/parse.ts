@@ -176,3 +176,71 @@ export function extractContentLinks(html: string, baseUrl: string): string[] {
 
   return Array.from(links);
 }
+
+
+/**
+ * Каноническая страница канала на источнике (не catalog):
+ *   /channel.php?slug=SLUG
+ */
+export function mapToChannelPage(sourceUrl: string): string {
+  try {
+    const u = new URL(sourceUrl);
+    const slug = extractSlug(sourceUrl);
+    if (slug) return `${u.origin}/channel.php?slug=${encodeURIComponent(slug)}`;
+    // уже channel.php — оставляем
+    if (/channel\.php/i.test(u.pathname)) return u.toString();
+    return sourceUrl;
+  } catch {
+    return sourceUrl;
+  }
+}
+
+/**
+ * Каноническая страница видео:
+ *   /video.php?slug=SLUG
+ */
+export function mapToVideoPage(sourceUrl: string): string {
+  try {
+    const u = new URL(sourceUrl);
+    const slug = extractSlug(sourceUrl);
+    if (slug && /video/i.test(sourceUrl)) {
+      return `${u.origin}/video.php?slug=${encodeURIComponent(slug)}`;
+    }
+    if (/video\.php/i.test(u.pathname)) return u.toString();
+    // query slug on video-ish urls
+    const q = u.searchParams.get('slug');
+    if (q) return `${u.origin}/video.php?slug=${encodeURIComponent(q)}`;
+    return sourceUrl;
+  } catch {
+    return sourceUrl;
+  }
+}
+
+/** Ссылки на video.php из HTML (каталог видео /videos.php) */
+export function extractVideoLinks(html: string, baseUrl: string): string[] {
+  const $ = cheerio.load(html);
+  const links = new Set<string>();
+
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href') ?? '';
+    if (!/video\.php/i.test(href)) return;
+    try {
+      links.add(new URL(href, baseUrl).toString());
+    } catch {
+      /* skip */
+    }
+  });
+
+  if (links.size === 0) {
+    const re = /video\.php\?[A-Za-z0-9_=&%.\-]+/gi;
+    for (const m of html.match(re) ?? []) {
+      try {
+        links.add(new URL(m, baseUrl).toString());
+      } catch {
+        /* noop */
+      }
+    }
+  }
+
+  return Array.from(links);
+}
