@@ -7,7 +7,7 @@ import { fetchForumList } from '@/lib/forum';
 
 export const dynamic = 'force-dynamic';
 
-/** Список тем форума — Server Component */
+/** Список КАТЕГОРИЙ форума */
 async function ForumList() {
   const data = await fetchForumList();
 
@@ -17,7 +17,7 @@ async function ForumList() {
         <AlertTriangle className="h-12 w-12 text-neon-pink opacity-70" />
         <h1 className="text-xl font-extrabold">Форум пока пуст</h1>
         <p className="max-w-sm text-sm text-white/60">
-          Не удалось спарсить темы с источников (Prod / Reserve). Архив форума ещё не наполнен.
+          Не удалось спарсить категории с зеркал. Попробуй позже.
         </p>
         {data.error && (
           <p className="glass max-w-full truncate rounded-xl px-4 py-2 font-mono text-[11px] text-neon-cyan">
@@ -40,21 +40,21 @@ async function ForumList() {
         <MessagesSquare className="h-5 w-5 text-neon-cyan" />
         <h1 className="text-lg font-extrabold">Форум</h1>
         <span className="glass ml-auto rounded-full px-2.5 py-0.5 text-[10px] font-medium text-white/50">
-          {data.origin.toUpperCase()} · {data.threads.length} тем
+          {data.origin.toUpperCase()} · {data.threads.length} категорий
         </span>
       </div>
 
       <ul className="space-y-2">
-        {data.threads.map((thread) => (
-          <li key={thread.id}>
+        {data.threads.map((cat) => (
+          <li key={cat.id}>
             <Link
-              href={`/forum/${thread.id}`}
+              href={`/forum/c/${cat.id}`}
               className="glass block rounded-2xl px-4 py-3 transition-colors hover:bg-white/10 active:scale-[0.99]"
             >
               <span className="line-clamp-2 text-sm font-semibold leading-snug text-white">
-                {thread.title}
+                {cat.title}
               </span>
-              <span className="mt-1 block text-[11px] text-white/40">#{thread.id}</span>
+              <span className="mt-1 block text-[11px] text-white/40">Категория · #{cat.id}</span>
             </Link>
           </li>
         ))}

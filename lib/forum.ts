@@ -118,7 +118,11 @@ function parseCategoryThreadsHtml(html: string): ForumThreadList['threads'] {
 
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') ?? '';
-    if (!/forum_thread\.php/i.test(href) && !/\/forum\/thread\//i.test(href)) return;
+    const isThread =
+      /forum_thread\.php/i.test(href) ||
+      /\/forum\/thread\//i.test(href) ||
+      (/forum\.php\?[^#]*id=\d+/i.test(href) && !/forum_category/i.test(href));
+    if (!isThread) return;
     const id = idFromHref(href);
     const title = $(el).text().replace(/\s+/g, ' ').trim();
     if (!id || !title || title.length < 3) return;
@@ -184,52 +188,10 @@ async function scrapeForumThread(id: string): Promise<ForumThread | null> {
   const safeId = id.replace(/[^\d]/g, '');
   if (!safeId) return null;
 
-  // 1) Категория: forum_category.php?id=
-  try {
-    const { html, origin } = await fetchPage(`/forum_category.php?id=${safeId}`);
-    const meta = parseMeta(html);
-    const threads = parseCategoryThreadsHtml(html);
-
-    if (threads.length > 0) {
-      void persistForumEntries(
-        threads.map((th) => ({
-          id: th.id,
-          title: th.title,
-          href: th.href,
-          kind: 'thread' as const,
-        })),
-      );
-      const listHtml = threads
-        .map(
-          (t) =>
-            `<div class="forum-thread-item" style="margin:0 0 12px;padding:12px;border-radius:12px;background:rgba(255,255,255,.05)">
-              <a href="/forum/thread/${t.id}" style="color:#00f2ea;font-weight:700;text-decoration:none">${escapeHtml(t.title)}</a>
-              <div style="opacity:.45;font-size:11px;margin-top:4px">#${t.id}</div>
-            </div>`,
-        )
-        .join('');
-
-      return {
-        id: safeId,
-        title: meta.title || `Категория #${safeId}`,
-        description: meta.description || `${threads.length} тем в категории`,
-        image: meta.image,
-        postsHtml: `<div class="forum-category-threads">${listHtml}</div>`,
-        plainText: threads.map((t) => t.title).join('\n'),
-        sourceUrl: `${PROD_BASE}/forum_category.php?id=${safeId}`,
-        origin,
-        cachedAt: new Date().toISOString(),
-      };
-    }
-  } catch {
-    /* пробуем как тему */
-  }
-
-  // 2) Тема: forum_thread.php?id=
+  // ТОЛЬКО тема. Категории — fetchCategoryThreads / /forum/c/[id]
   const threadPaths = [
     `/forum_thread.php?id=${safeId}`,
-    `/forum.php?id=${safeId}`,
-    `/topic/${safeId}`,
+    `/forum.php?thread=${safeId}`,
   ];
 
   for (const path of threadPaths) {
@@ -241,66 +203,49 @@ async function scrapeForumThread(id: string): Promise<ForumThread | null> {
       const $ = cheerio.load(html);
       $('script, style, noscript, iframe, object, embed, form, nav, footer, header, link').remove();
 
-      const selectors = [
-        '.post', '.post-body', '.postbody', '.forum-post', '.message',
-        '.comment', 'article', '#thread', '.thread-posts', 'main', '.content',
-      ];
-      let $body = $('body') as ReturnType<typeof $>;
-      for (const sel of selectors) {
-        const found = $(sel);
-        if (found.length > 0) {
-          // берём контейнер со всеми постами, не first()
-          $body = found.parent().length ? (found.parent() as ReturnType<typeof $>) : (found as ReturnType<typeof $>);
-          if (found.length > 1) {
-            // склеиваем посты
-            const chunks: string[] = [];
-            found.each((_, el) => {
-              chunks.push($.html(el) ?? '');
-            });
-            const postsHtml = chunks.join('\n').trim();
-            const plainText = found
-              .text()
-              .replace(/[ \t]+/g, ' ')
-              .replace(/\n{3,}/g, '\n\n')
-              .trim();
-            if (plainText.length >= 20 || postsHtml.length >= 40) {
-              return {
-                id: safeId,
-                title: meta.title,
-                description: meta.description,
-                image: meta.image,
-                postsHtml,
-                plainText,
-                sourceUrl: `${PROD_BASE}${path}`,
-                origin,
-                cachedAt: new Date().toISOString(),
-              };
-            }
+      const postNodes = $('.post, .post-body, .postbody, .forum-post, .message, .comment, article');
+      let postsHtml = '';
+      let plainText = '';
+
+      if (postNodes.length > 0) {
+        const chunks: string[] = [];
+        postNodes.each((_, el) => {
+          chunks.push($.html(el) ?? '');
+        });
+        postsHtml = chunks.join('\n').trim();
+        plainText = postNodes
+          .text()
+          .replace(/[ \t]+/g, ' ')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+      } else {
+        const $body = $('main, .content, #content, body').first();
+        $body.find('img[src]').each((_, el) => {
+          const src = $(el).attr('src') ?? '';
+          try {
+            $(el).attr('src', new URL(src, PROD_BASE).toString());
+          } catch {
+            $(el).removeAttr('src');
           }
-          break;
-        }
+        });
+        postsHtml = ($body.html() ?? '').trim();
+        plainText = $body
+          .text()
+          .replace(/[ \t]+/g, ' ')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
       }
 
-      $body.find('img[src]').each((_, el) => {
-        const src = $(el).attr('src') ?? '';
-        try {
-          $(el).attr('src', new URL(src, PROD_BASE).toString());
-        } catch {
-          $(el).removeAttr('src');
-        }
-      });
-      $body.find('a[href]').each((_, el) => {
-        $(el).replaceWith($(el).contents());
-      });
+      if (plainText.length < 10 && postsHtml.length < 20) continue;
 
-      const postsHtml = ($body.html() ?? '').trim();
-      const plainText = $body
-        .text()
-        .replace(/[ \t]+/g, ' ')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
-
-      if (plainText.length < 20 && postsHtml.length < 40) continue;
+      void persistForumEntries([
+        {
+          id: safeId,
+          title: meta.title,
+          href: `${PROD_BASE}/forum_thread.php?id=${safeId}`,
+          kind: 'thread',
+        },
+      ]);
 
       return {
         id: safeId,
@@ -309,7 +254,7 @@ async function scrapeForumThread(id: string): Promise<ForumThread | null> {
         image: meta.image,
         postsHtml,
         plainText,
-        sourceUrl: `${PROD_BASE}${path}`,
+        sourceUrl: `${PROD_BASE}/forum_thread.php?id=${safeId}`,
         origin,
         cachedAt: new Date().toISOString(),
       };

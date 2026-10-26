@@ -111,14 +111,18 @@ async function scrapeContent(sourceUrl: string): Promise<StreamContent> {
 const scrapeContentCached = foreverCachePage(scrapeContent);
 
 /** Последовательный парсе только новых URL */
-async function scrapeNewOnly(links: string[], knownIds: Set<string>): Promise<StreamContent[]> {
+async function scrapeNewOnly(
+  links: string[],
+  knownIds: Set<string>,
+  maxNew = MAX_NEW_SCRAPE_PER_RUN,
+): Promise<StreamContent[]> {
   const fresh: string[] = [];
   for (const url of links) {
     const id = contentId(url);
     if (!knownIds.has(id)) fresh.push(url);
   }
 
-  const toFetch = fresh.slice(0, MAX_NEW_SCRAPE_PER_RUN);
+  const toFetch = fresh.slice(0, maxNew);
   const out: StreamContent[] = [];
 
   for (let i = 0; i < toFetch.length; i++) {
@@ -166,8 +170,9 @@ export async function fetchFeed(limit = FEED_LIMIT): Promise<FeedResult> {
       console.info('[fetcher] feed mirrors:', originsHit.join(', '), 'links:', links.length);
     }
 
-    const newly = await scrapeNewOnly(links, known);
-    if (newly.length) void persistToArchive(newly);
+    const batch = known.size === 0 ? Math.max(MAX_NEW_SCRAPE_PER_RUN, FEED_LIMIT) : MAX_NEW_SCRAPE_PER_RUN;
+    const newly = await scrapeNewOnly(links, known, batch);
+    if (newly.length) await persistToArchive(newly);
 
     // карточки по известным ссылкам — из архива / кэша (без лишних хитов)
     const fromArchive: StreamContent[] = [];
@@ -181,7 +186,7 @@ export async function fetchFeed(limit = FEED_LIMIT): Promise<FeedResult> {
     const merged = mergeById(newly, fromArchive.length ? fromArchive : archived).slice(0, limit);
     if (merged.length) {
       setMemoryFeed(merged);
-      void persistToArchive(merged);
+      await persistToArchive(merged);
       return { items: merged, allFailed: false };
     }
   } catch (e) {
@@ -235,7 +240,7 @@ export async function fetchVideosFeed(limit = FEED_LIMIT): Promise<FeedResult> {
 
     const merged = mergeById(newly, fromArchive.length ? fromArchive : archived).slice(0, limit);
     if (merged.length) {
-      void persistToArchive(merged);
+      await persistToArchive(merged);
       return { items: merged, allFailed: false };
     }
   } catch (e) {
