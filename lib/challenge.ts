@@ -49,8 +49,8 @@ async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = FETCH
     const dispatcher = await getInsecureDispatcher();
     if (!dispatcher) throw e;
     console.warn('[challenge] TLS broken, retry insecure:', url);
-    return await fetch(url, { ...base, // @ts-expect-error undici dispatcher
-      dispatcher } as RequestInit);
+    // undici dispatcher не в типах DOM RequestInit
+    return await fetch(url, { ...base, dispatcher } as RequestInit & { dispatcher: unknown });
   }
 }
 
