@@ -1,13 +1,12 @@
 'use client';
 
 /**
- * Страница "Добавить": принимает URL страницы источника (channel.php / video.php),
- * дергает РЕАЛЬНЫЙ API /api/fetch-content для парсинга метаданных и показывает
- * готовый чистый iframe-код (embed.php / embed_video.php маппинг).
+ * Добавить эфир вручную → парсинг → ОБЩИЙ архив (видят все).
  */
 
 import { useState } from 'react';
-import { Code2, Copy, Check, Loader2 } from 'lucide-react';
+import { Code2, Copy, Check, Loader2, Save } from 'lucide-react';
+import Link from 'next/link';
 import BottomNav from '@/components/BottomNav';
 import type { StreamContent } from '@/lib/types';
 
@@ -15,6 +14,7 @@ interface ApiResponse {
   ok: boolean;
   data?: StreamContent;
   iframe?: string;
+  saved?: boolean;
   error?: string;
 }
 
@@ -24,13 +24,16 @@ export default function AddPage() {
   const [result, setResult] = useState<ApiResponse | null>(null);
   const [copied, setCopied] = useState(false);
 
-  /** Реальный вызов серверного парсера через API route */
   async function parse() {
     if (!url.trim()) return;
     setLoading(true);
     setResult(null);
     try {
-      const res = await fetch(`/api/fetch-content?url=${encodeURIComponent(url.trim())}`);
+      const res = await fetch('/api/fetch-content', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url.trim() }),
+      });
       const json = (await res.json()) as ApiResponse;
       setResult(json);
     } catch (e) {
@@ -52,15 +55,16 @@ export default function AddPage() {
       <h1 className="mb-2 text-xl font-extrabold">
         Добавить <span className="text-neon-cyan">эфир</span>
       </h1>
-      <p className="mb-6 text-center text-xs text-white/50">
-        Вставь ссылку на channel.php или video.php — проспарсим meta и смапим в embed навсегда.
+      <p className="mb-6 max-w-md text-center text-xs text-white/50">
+        Ссылка на channel.php / video.php с любого зеркала. Карточка пишется в общий архив и
+        появляется у всех в ленте и поиске.
       </p>
 
       <div className="glass flex w-full max-w-md items-center gap-2 rounded-2xl p-2">
         <input
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://streamlivetv.freedev.app/channel.php?id=..."
+          placeholder="https://…/channel.php?slug=…"
           className="w-full bg-transparent px-3 text-sm outline-none placeholder:text-white/30"
         />
         <button
@@ -68,30 +72,53 @@ export default function AddPage() {
           disabled={loading}
           className="flex shrink-0 items-center gap-1 rounded-xl bg-gradient-to-r from-neon-cyan to-neon-pink px-4 py-2 text-xs font-bold text-black disabled:opacity-50"
         >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Code2 className="h-4 w-4" />}
-          Парсить
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          {loading ? '…' : 'В архив'}
         </button>
       </div>
 
-      {result?.ok && result.data && (
-        <div className="animate-rise glass mt-6 w-full max-w-md space-y-3 rounded-2xl p-4">
-          <h2 className="text-sm font-bold">{result.data.title}</h2>
-          <p className="line-clamp-2 text-xs text-white/70">{result.data.description}</p>
-          <p className="font-mono text-[10px] text-neon-cyan">{result.data.embedUrl}</p>
-          <button
-            onClick={copyIframe}
-            className="flex items-center gap-1.5 rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold transition-colors hover:bg-white/20"
-          >
-            {copied ? <Check className="h-4 w-4 text-neon-cyan" /> : <Copy className="h-4 w-4" />}
-            {result.iframe}
-          </button>
-        </div>
+      {result && !result.ok && (
+        <p className="mt-6 max-w-md text-center text-sm text-neon-pink">{result.error}</p>
       )}
 
-      {result && !result.ok && (
-        <p className="glass mt-6 max-w-md rounded-xl px-4 py-3 text-center text-xs text-neon-pink">
-          Не удалось распарсить: {result.error ?? 'источник недоступен'}
-        </p>
+      {result?.ok && result.data && (
+        <div className="glass mt-8 w-full max-w-md space-y-4 rounded-2xl p-5">
+          {result.saved && (
+            <p className="rounded-xl bg-neon-cyan/15 px-3 py-2 text-center text-xs font-bold text-neon-cyan">
+              Сохранено в общий архив · origin: {result.data.origin}
+            </p>
+          )}
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-white/40">Название</p>
+            <p className="font-bold">{result.data.title}</p>
+          </div>
+          {result.data.description && (
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-white/40">Описание</p>
+              <p className="text-sm text-white/70">{result.data.description}</p>
+            </div>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href={`/watch/${result.data.id}`}
+              className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold text-neon-cyan"
+            >
+              Открыть карточку
+            </Link>
+            <button
+              onClick={copyIframe}
+              className="flex items-center gap-1 rounded-xl bg-white/10 px-3 py-2 text-xs font-bold"
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-neon-cyan" /> : <Copy className="h-3.5 w-3.5" />}
+              {copied ? 'Скопировано' : 'iframe'}
+            </button>
+          </div>
+          {result.iframe && (
+            <pre className="overflow-x-auto rounded-xl bg-black/50 p-3 text-[10px] text-white/50">
+              <Code2 className="mb-1 inline h-3 w-3" /> {result.iframe}
+            </pre>
+          )}
+        </div>
       )}
 
       <BottomNav />

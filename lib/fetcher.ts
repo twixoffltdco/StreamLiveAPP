@@ -62,6 +62,32 @@ async function fetchPageFailover(
   throw new SourceError(lastError?.message ?? 'Все источники недоступны');
 }
 
+/** Собрать ссылки со ВСЕХ зеркал (не только первого живого) */
+async function collectLinksFromAllMirrors(
+  pathnames: string[],
+  extract: (html: string, base: string) => string[],
+): Promise<{ links: string[]; originsHit: SourceOrigin[] }> {
+  const links = new Set<string>();
+  const originsHit: SourceOrigin[] = [];
+
+  for (const { base, origin } of SOURCE_BASES) {
+    for (const pathname of pathnames) {
+      try {
+        const { html } = await fetchWithChallenge(`${base}${pathname}`);
+        originsHit.push(origin);
+        for (const u of extract(html, base)) links.add(u);
+        // хватит одного path на зеркало, если уже есть ссылки
+        if (links.size > 0) break;
+      } catch (e) {
+        console.warn(`[fetcher] ${origin} ${pathname}:`, (e as Error).message);
+      }
+    }
+  }
+  return { links: Array.from(links), originsHit: Array.from(new Set(originsHit)) };
+}
+
+
+
 async function scrapeContent(sourceUrl: string): Promise<StreamContent> {
   const u = new URL(sourceUrl);
   const { html, origin } = await fetchPageFailover(u.pathname + u.search);
@@ -131,8 +157,14 @@ export async function fetchFeed(limit = FEED_LIMIT): Promise<FeedResult> {
 
   // 3) Редкий запрос списка ссылок на PHP
   try {
-    const { html: indexHtml } = await fetchPageFailover('/');
-    const links = extractContentLinks(indexHtml, PROD_BASE);
+    // Все зеркала: prod + reserve + mirror3
+    const { links, originsHit } = await collectLinksFromAllMirrors(
+      ['/'],
+      extractContentLinks,
+    );
+    if (originsHit.length) {
+      console.info('[fetcher] feed mirrors:', originsHit.join(', '), 'links:', links.length);
+    }
 
     const newly = await scrapeNewOnly(links, known);
     if (newly.length) void persistToArchive(newly);
@@ -180,17 +212,15 @@ export async function fetchVideosFeed(limit = FEED_LIMIT): Promise<FeedResult> {
   const known = await getArchivedIdSet();
 
   try {
-    let links: string[] = [];
-    for (const path of ['/videos.php', '/videos']) {
-      try {
-        const { html } = await fetchPageFailover(path);
-        links = Array.from(
-          new Set([...extractVideoLinks(html, PROD_BASE), ...extractContentLinks(html, PROD_BASE)]),
-        );
-        if (links.length) break;
-      } catch {
-        /* next */
-      }
+    const { links, originsHit } = await collectLinksFromAllMirrors(
+      ['/videos.php', '/videos'],
+      (html, base) => [
+        ...extractVideoLinks(html, base),
+        ...extractContentLinks(html, base),
+      ],
+    );
+    if (originsHit.length) {
+      console.info('[fetcher] videos mirrors:', originsHit.join(', '), 'links:', links.length);
     }
 
     const newly = await scrapeNewOnly(links, known);

@@ -19,17 +19,39 @@ import { BROWSER_UA, FETCH_TIMEOUT_MS } from './config';
 /** Кэш решённых challenge по origin (cookie не меняются часто) */
 const solved = new Map<string, string>();
 
-/** Таймаут fetch (>3 сек => failover на резерв) */
+/** Agent без проверки TLS — для зеркал со слетевшим сертификатом (domtv и т.п.) */
+let insecureDispatcher: unknown = null;
+async function getInsecureDispatcher() {
+  if (insecureDispatcher) return insecureDispatcher;
+  try {
+    const { Agent } = await import('undici');
+    insecureDispatcher = new Agent({ connect: { rejectUnauthorized: false } });
+  } catch {
+    insecureDispatcher = null;
+  }
+  return insecureDispatcher;
+}
+
+/** Таймаут fetch; при ошибке сертификата — повтор с rejectUnauthorized: false */
 async function timedFetch(url: string, init: RequestInit = {}, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response> {
-  const res = await fetch(url, {
+  const base: RequestInit = {
     ...init,
     signal: AbortSignal.timeout(timeoutMs),
-    // Источники используют самоподписанные/нестандартные сертификаты
-    // (@see ZeroSSL / self-signed). На Node fetch это включается флагом
-    // NODE_TLS_REJECT_UNAUTHORIZED=0 в npm-скриптах для локальной разработки.
     cache: 'no-store',
-  });
-  return res;
+  };
+  try {
+    return await fetch(url, base);
+  } catch (e) {
+    const msg = (e as Error).message || '';
+    const tls =
+      /certificate|SSL|TLS|CERT|unable to verify|self.signed|UNABLE_TO_VERIFY/i.test(msg);
+    if (!tls) throw e;
+    const dispatcher = await getInsecureDispatcher();
+    if (!dispatcher) throw e;
+    console.warn('[challenge] TLS broken, retry insecure:', url);
+    return await fetch(url, { ...base, // @ts-expect-error undici dispatcher
+      dispatcher } as RequestInit);
+  }
 }
 
 /** Извлекает toNumbers("...") триплет a/b/c из HTML челленджа */

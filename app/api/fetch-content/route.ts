@@ -1,38 +1,69 @@
 /**
- * app/api/fetch-content/route.ts — API роут раздачи спаршенного контента.
- *
- * GET /api/fetch-content            -> лента (feed) с Prod/Reserve failover
- * GET /api/fetch-content?url=...    -> метаданные одной страницы + iframe-код
- * GET /api/fetch-content?q=запрос   -> поиск по источнику + вечному архиву
- *
- * Все ответы проходят через unstable_cache (1 год) и файловый архив,
- * поэтому однажды спаршенные данные живут на нашем сайте навсегда.
+ * GET  /api/fetch-content?url=...  — парсинг + запись в общий архив
+ * POST /api/fetch-content          — то же body: { url }
+ * GET  /api/fetch-content?q=...    — поиск по архиву
+ * GET  /api/fetch-content          — лента
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { fetchFeed, searchFeed } from '@/lib/fetcher';
-import { foreverCachePage, contentId } from '@/lib/cache';
+import { contentId, persistToArchive } from '@/lib/cache';
 import { buildIframeCode, detectKind, mapToEmbed, parseMeta } from '@/lib/parse';
 import { fetchWithChallenge } from '@/lib/challenge';
-import { PROD_BASE, RESERVE_BASE } from '@/lib/config';
+import { SOURCE_BASES, type SourceOrigin } from '@/lib/config';
 import type { StreamContent } from '@/lib/types';
 
-/** Отдаём JSON всегда свежим на уровне CDN (кэш живёт внутри unstable_cache) */
 export const dynamic = 'force-dynamic';
 
-/** Парсинг одной произвольной страницы источника (channel/video.php) с вечным кэшем */
-async function scrapeSingle(sourceUrl: string): Promise<StreamContent> {
-  let html: string;
+function originOf(url: string): SourceOrigin {
   try {
-    ({ html } = await fetchWithChallenge(sourceUrl));
+    const o = new URL(url).origin;
+    for (const s of SOURCE_BASES) {
+      if (new URL(s.base).origin === o) return s.origin;
+    }
   } catch {
-    // Failover: подменяем origin на резервный
-    const reserveUrl = sourceUrl.replace(PROD_BASE, RESERVE_BASE);
-    ({ html } = await fetchWithChallenge(reserveUrl));
+    /* */
+  }
+  return 'prod';
+}
+
+async function scrapeAndArchive(sourceUrl: string): Promise<StreamContent> {
+  let html = '';
+  let finalUrl = sourceUrl;
+  let lastErr: Error | null = null;
+
+  // 1) как прислали
+  try {
+    const r = await fetchWithChallenge(sourceUrl);
+    html = r.html;
+    finalUrl = r.finalUrl;
+  } catch (e) {
+    lastErr = e as Error;
+  }
+
+  // 2) тот же path на каждом зеркале
+  if (!html) {
+    const u = new URL(sourceUrl);
+    const path = u.pathname + u.search;
+    for (const { base } of SOURCE_BASES) {
+      try {
+        const r = await fetchWithChallenge(`${base}${path}`);
+        html = r.html;
+        finalUrl = r.finalUrl;
+        sourceUrl = `${base}${path}`;
+        break;
+      } catch (e) {
+        lastErr = e as Error;
+      }
+    }
+  }
+
+  if (!html) {
+    throw lastErr || new Error('Не удалось загрузить URL ни с одного зеркала');
   }
 
   const meta = parseMeta(html);
-  return {
+  const item: StreamContent = {
     id: contentId(sourceUrl),
     title: meta.title || 'Без названия',
     description: meta.description || '',
@@ -40,12 +71,24 @@ async function scrapeSingle(sourceUrl: string): Promise<StreamContent> {
     sourceUrl,
     embedUrl: mapToEmbed(sourceUrl),
     kind: detectKind(sourceUrl),
-    origin: sourceUrl.includes(PROD_BASE) ? 'prod' : 'reserve',
+    origin: originOf(finalUrl || sourceUrl),
     cachedAt: new Date().toISOString(),
   };
+
+  // В общий архив — чтобы видели все
+  await persistToArchive([item]);
+  return item;
 }
 
-const scrapeSingleCached = foreverCachePage(scrapeSingle);
+async function handleUrl(url: string) {
+  const item = await scrapeAndArchive(url);
+  return NextResponse.json({
+    ok: true,
+    data: item,
+    iframe: buildIframeCode(item.embedUrl, item.title),
+    saved: true,
+  });
+}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
@@ -53,28 +96,44 @@ export async function GET(req: NextRequest) {
   const q = searchParams.get('q');
 
   try {
-    // 1. Одна страница по URL -> метаданные + чистый iframe-код
-    if (url) {
-      const item = await scrapeSingleCached(url);
+    if (url) return await handleUrl(url);
+
+    if (q) {
+      const feed = await searchFeed(q);
       return NextResponse.json({
         ok: true,
-        data: item,
-        iframe: buildIframeCode(item.embedUrl, item.title),
+        query: q,
+        items: feed.items,
+        allFailed: feed.allFailed,
       });
     }
 
-    // 2. Поиск
-    if (q) {
-      const feed = await searchFeed(q);
-      return NextResponse.json({ ok: true, query: q, items: feed.items, allFailed: feed.allFailed });
-    }
-
-    // 3. Лента по умолчанию
     const feed = await fetchFeed();
-    return NextResponse.json({ ok: !feed.allFailed, items: feed.items, error: feed.error });
+    return NextResponse.json({
+      ok: true,
+      items: feed.items,
+      allFailed: feed.allFailed,
+      error: feed.error,
+    });
   } catch (e) {
     return NextResponse.json(
-      { ok: false, error: (e as Error).message ?? 'Unknown error' },
+      { ok: false, error: (e as Error).message },
+      { status: 502 },
+    );
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = (await req.json().catch(() => ({}))) as { url?: string };
+    const url = (body.url || '').trim();
+    if (!url) {
+      return NextResponse.json({ ok: false, error: 'Нужен url' }, { status: 400 });
+    }
+    return await handleUrl(url);
+  } catch (e) {
+    return NextResponse.json(
+      { ok: false, error: (e as Error).message },
       { status: 502 },
     );
   }
