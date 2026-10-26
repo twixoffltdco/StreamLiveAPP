@@ -22,7 +22,7 @@ export interface StreamContent {
   embedUrl: string;
   kind: ContentKind;
   /** Сервер, с которого реально получены данные */
-  origin: 'prod' | 'reserve';
+  origin: 'prod' | 'reserve' | 'mirror3';
   /** ISO-дата кэширования */
   cachedAt: string;
 }
@@ -49,7 +49,7 @@ export interface ForumThreadSummary {
 /** Список тем форума */
 export interface ForumThreadList {
   threads: ForumThreadSummary[];
-  origin: 'prod' | 'reserve';
+  origin: 'prod' | 'reserve' | 'mirror3';
   allFailed: boolean;
   error?: string;
 }
@@ -65,6 +65,6 @@ export interface ForumThread {
   /** Плоский читабельный текст темы */
   plainText: string;
   sourceUrl: string;
-  origin: 'prod' | 'reserve';
+  origin: 'prod' | 'reserve' | 'mirror3';
   cachedAt: string;
 }

@@ -18,7 +18,7 @@
  */
 
 import { createHash } from 'crypto';
-import { FEED_LIMIT, PROD_BASE, RESERVE_BASE } from './config';
+import { FEED_LIMIT, PROD_BASE, SOURCE_BASES, type SourceOrigin } from './config';
 import { fetchWithChallenge } from './challenge';
 import { contentId, foreverCachePage, getArchivedItems, persistToArchive } from './cache';
 import { detectKind, extractContentLinks, mapToEmbed, parseMeta } from './parse';
@@ -42,11 +42,9 @@ export class SourceError extends Error {
 export interface ScrapedPage {
   html: string;
   /** Честный ответ: с какого сервера реально пришли данные */
-  origin: 'prod' | 'reserve';
+  origin: SourceOrigin;
   finalUrl: string;
 }
-
-const RESERVE_ORIGIN = new URL(RESERVE_BASE).origin;
 
 /** Пробует один абсолютный URL; возвращает null вместо исключения */
 async function tryFetch(url: string): Promise<{ html: string; finalUrl: string } | null> {
@@ -59,35 +57,27 @@ async function tryFetch(url: string): Promise<{ html: string; finalUrl: string }
 }
 
 /**
- * Стучится сначала в PROD. Если таймаут (>3 сек) или ошибка (5xx/сеть/DNS/TLS) —
- * мгновенно и прозрачно переключаемся на RESERVE.
+ * Стучится по SOURCE_BASES: prod → reserve → mirror3.
  */
 export async function fetchFailover(pathname: string): Promise<ScrapedPage> {
-  const attempts: Array<{ url: string; origin: 'prod' | 'reserve' }> = [
-    { url: `${PROD_BASE}${pathname}`, origin: 'prod' },
-    { url: `${RESERVE_BASE}${pathname}`, origin: 'reserve' },
-  ];
-
   let lastError = '';
-  for (const attempt of attempts) {
-    const ok = await tryFetch(attempt.url);
-    if (ok) return { html: ok.html, origin: attempt.origin, finalUrl: ok.finalUrl };
-    lastError = `Источник ${attempt.origin} (${attempt.url}) не ответил`;
+  for (const { base, origin } of SOURCE_BASES) {
+    const ok = await tryFetch(`${base}${pathname}`);
+    if (ok) return { html: ok.html, origin, finalUrl: ok.finalUrl };
+    lastError = `Источник ${origin} (${base}${pathname}) не ответил`;
   }
-
-  throw new SourceError(lastError || 'Оба источника недоступны');
+  throw new SourceError(lastError || 'Все источники недоступны');
 }
 
-/** То же для произвольного абсолютного URL (прозрачная подмена домена на резервный) */
+/** Абсолютный URL — тот же path на каждом зеркале по порядку failover */
 async function fetchAnyUrl(sourceUrl: string): Promise<ScrapedPage> {
   const u = new URL(sourceUrl);
   const path = `${u.pathname}${u.search}`;
-  const preferReserve = u.origin === RESERVE_ORIGIN;
-  const ordered = preferReserve
-    ? ([{ base: RESERVE_BASE, origin: 'reserve' as const },
-       { base: PROD_BASE, origin: 'prod' as const }])
-    : ([{ base: PROD_BASE, origin: 'prod' as const },
-       { base: RESERVE_BASE, origin: 'reserve' as const }]);
+  // если URL уже с одного из зеркал — начнём с него
+  const preferred = SOURCE_BASES.find((s) => u.origin === new URL(s.base).origin);
+  const ordered = preferred
+    ? [preferred, ...SOURCE_BASES.filter((s) => s.origin !== preferred.origin)]
+    : SOURCE_BASES;
 
   let lastError = '';
   for (const step of ordered) {
@@ -97,6 +87,8 @@ async function fetchAnyUrl(sourceUrl: string): Promise<ScrapedPage> {
   }
   throw new SourceError(lastError || `Источник недоступен: ${sourceUrl}`);
 }
+
+
 
 /* ============================================================================
  * 2. КОНТЕНТ: главная лента и страницы видео/каналов

@@ -12,7 +12,7 @@
 
 import { unstable_cache } from 'next/cache';
 import * as cheerio from 'cheerio';
-import { PROD_BASE, RESERVE_BASE } from './config';
+import { PROD_BASE, SOURCE_BASES, type SourceOrigin } from './config';
 import { fetchWithChallenge } from './challenge';
 import { parseMeta } from './parse';
 import type { ForumThread, ForumThreadList } from './types';
@@ -27,26 +27,21 @@ export class ForumSourceError extends Error {
 
 interface PageResult {
   html: string;
-  origin: 'prod' | 'reserve';
+  origin: SourceOrigin;
 }
 
 async function fetchPage(pathname: string): Promise<PageResult> {
-  const attempts: Array<{ url: string; origin: 'prod' | 'reserve' }> = [
-    { url: `${PROD_BASE}${pathname}`, origin: 'prod' },
-    { url: `${RESERVE_BASE}${pathname}`, origin: 'reserve' },
-  ];
-
   let lastError = '';
-  for (const attempt of attempts) {
+  for (const { base, origin } of SOURCE_BASES) {
     try {
-      const { html } = await fetchWithChallenge(attempt.url);
-      return { html, origin: attempt.origin };
+      const { html } = await fetchWithChallenge(`${base}${pathname}`);
+      return { html, origin };
     } catch (e) {
       lastError = (e as Error).message;
-      console.warn(`[forum] ${attempt.origin} (${attempt.url}) недоступен:`, lastError);
+      console.warn(`[forum] ${origin} (${base}${pathname}) недоступен:`, lastError);
     }
   }
-  throw new ForumSourceError(lastError || 'Оба источника форума недоступны');
+  throw new ForumSourceError(lastError || 'Все источники форума недоступны');
 }
 
 /** id из forum_category.php?id=12 / forum_thread.php?id=12 / /forum/12 */

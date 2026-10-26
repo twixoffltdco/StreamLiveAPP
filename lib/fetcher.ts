@@ -15,8 +15,9 @@ import {
   FEED_REFRESH_SEC,
   MAX_NEW_SCRAPE_PER_RUN,
   PROD_BASE,
-  RESERVE_BASE,
   SCRAPE_DELAY_MS,
+  SOURCE_BASES,
+  type SourceOrigin,
 } from './config';
 import { fetchWithChallenge } from './challenge';
 import { detectKind, extractContentLinks, extractVideoLinks, mapToEmbed, parseMeta } from './parse';
@@ -47,23 +48,18 @@ async function sleep(ms: number) {
 
 async function fetchPageFailover(
   pathname: string,
-): Promise<{ html: string; origin: 'prod' | 'reserve'; finalUrl: string }> {
-  const bases: Array<{ url: string; origin: 'prod' | 'reserve' }> = [
-    { url: `${PROD_BASE}${pathname}`, origin: 'prod' },
-    { url: `${RESERVE_BASE}${pathname}`, origin: 'reserve' },
-  ];
-
+): Promise<{ html: string; origin: SourceOrigin; finalUrl: string }> {
   let lastError: Error | null = null;
-  for (const base of bases) {
+  for (const { base, origin } of SOURCE_BASES) {
     try {
-      const { html, finalUrl } = await fetchWithChallenge(base.url);
-      return { html, origin: base.origin, finalUrl };
+      const { html, finalUrl } = await fetchWithChallenge(`${base}${pathname}`);
+      return { html, origin, finalUrl };
     } catch (e) {
       lastError = e as Error;
-      console.warn(`[fetcher] ${base.origin} недоступен:`, lastError.message);
+      console.warn(`[fetcher] ${origin} недоступен:`, lastError.message);
     }
   }
-  throw new SourceError(lastError?.message ?? 'Оба источника недоступны');
+  throw new SourceError(lastError?.message ?? 'Все источники недоступны');
 }
 
 async function scrapeContent(sourceUrl: string): Promise<StreamContent> {

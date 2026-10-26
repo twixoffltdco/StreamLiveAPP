@@ -1,6 +1,6 @@
 import type { MetadataRoute } from 'next';
 import { contentId, getArchivedItems } from '@/lib/cache';
-import { PROD_BASE, RESERVE_BASE } from '@/lib/config';
+import { SOURCE_BASES } from '@/lib/config';
 import { extractContentLinks, extractVideoLinks } from '@/lib/parse';
 
 async function safeFetch(url: string): Promise<string> {
@@ -61,7 +61,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     /* empty */
   }
 
-  for (const origin of [PROD_BASE, RESERVE_BASE]) {
+  for (const { base: origin } of SOURCE_BASES) {
     const indexHtml = await safeFetch(`${origin}/`);
     if (indexHtml) {
       for (const link of extractContentLinks(indexHtml, origin).slice(0, 80)) {
